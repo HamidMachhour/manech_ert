@@ -1,0 +1,273 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CACHE_VERSION: 1
+
+jobs:
+  # ========================================
+  # Test Job - Runs on all commits
+  # ========================================
+  test:
+    name: Test (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3']
+        include:
+          - php: '8.3'
+            coverage: true
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: ert_station_test
+          MYSQL_ROOT_PASSWORD: testpass
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+        ports:
+          - 3306:3306
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mysql, mbstring, zip, intl, json
+          ini-values: error_reporting=E_ALL
+          coverage: ${{ matrix.coverage && 'xdebug' || 'none' }}
+
+      - name: Verify PHP installation
+        run: php -v && composer -V
+
+      - name: Cache Composer packages
+        uses: actions/cache@v3
+        with:
+          path: vendor
+          key: php-${{ matrix.php }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: php-${{ matrix.php }}-composer-
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress --no-suggest
+
+      - name: Setup environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          echo "APP_ENV=testing" >> .env
+          echo "DB_DATABASE=ert_station_test" >> .env
+          echo "DB_USERNAME=root" >> .env
+          echo "DB_PASSWORD=testpass" >> .env
+
+      - name: Run migrations
+        run: php artisan migrate --force
+
+      - name: Run tests
+        run: php artisan test
+        if: matrix.coverage != true
+
+      - name: Run tests with coverage
+        run: php artisan test --coverage --coverage-html=coverage
+        if: matrix.coverage == true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: matrix.coverage == true
+        with:
+          files: ./coverage/index.html
+          fail_ci_if_error: false
+
+  # ========================================
+  # Lint Job - Check code style
+  # ========================================
+  lint:
+    name: Code Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: phpstan, pint
+
+      - name: Cache Composer packages
+        uses: actions/cache@v3
+        with:
+          path: vendor
+          key: php-8.3-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: php-8.3-composer-
+
+      - name: Install Composer dependencies
+        run: composer install --no-progress
+
+      - name: Run Pint (code formatting)
+        run: pint --test
+        continue-on-error: true
+
+      - name: Run PHPStan (static analysis)
+        run: phpstan analyse --memory-limit=512M
+        continue-on-error: true
+
+  # ========================================
+  # Security Job - Check for vulnerabilities
+  # ========================================
+  security:
+    name: Security Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+
+      - name: Cache Composer packages
+        uses: actions/cache@v3
+        with:
+          path: vendor
+          key: php-8.3-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: php-8.3-composer-
+
+      - name: Install dependencies
+        run: composer install --no-progress
+
+      - name: Check for security vulnerabilities
+        run: composer audit
+        continue-on-error: true
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+  # ========================================
+  # Deploy Job - Only runs on main branch
+  # ========================================
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            
+            # Pull latest code
+            git fetch origin
+            git checkout main
+            git pull origin main
+            
+            # Install dependencies
+            composer install --no-dev --optimize-autoloader
+            source venv/bin/activate
+            pip install -r requirements.txt
+            
+            # Run migrations
+            php artisan migrate --force
+            
+            # Clear caches
+            php artisan cache:clear
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+            
+            # Restart services
+            sudo systemctl restart laravel-queue
+            sudo systemctl restart php8.3-fpm
+            
+            echo "✅ Deployment successful!"
+
+      - name: Notify Slack (Success)
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "✅ ERT Station deployed successfully",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *Deployment Successful*\n*Repository:* ${{ github.repository }}\n*Branch:* main\n*Commit:* ${{ github.sha }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+      - name: Notify Slack (Failure)
+        if: failure()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "❌ ERT Station deployment failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Deployment Failed*\n*Repository:* ${{ github.repository }}\n*Branch:* main\n*Commit:* ${{ github.sha }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+  # ========================================
+  # Notify - Success summary
+  # ========================================
+  notify:
+    name: Notify Build Status
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test, lint]
+
+    steps:
+      - name: Build Passed
+        if: ${{ needs.test.result == 'success' && needs.lint.result == 'success' }}
+        run: echo "✅ All checks passed!"
+
+      - name: Build Failed
+        if: failure()
+        run: echo "❌ Build failed. Check logs above."
