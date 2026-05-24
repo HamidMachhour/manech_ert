@@ -11,7 +11,7 @@ The setup is fully optimized around the following four active hardware units:
 2. **Digital I/O Expander Matrix:** 1 × MCP23017 (16-Bit digital I/O port expander communicating over I2C).
 3. **Switching Rail Matrix:** 1 × 16-Channel Mechanical Relay Module Board (Optocoupler isolated, active-low or active-high triggering).
 4. **High-Resolution Instrumentation ADC:** 1 × ADS1115 (16-Bit Delta-Sigma Analog-to-Digital Converter with built-in Programmable Gain Amplifier, communicating over I2C).
-5. **Physical Subsurface Array:** 16 × Steel Grounding Stakes (Aligned linearly, typically spaced at a constant interval, e.g., $a = 2\\{meters}$).
+5. **Physical Subsurface Array:** 16 × Steel Grounding Stakes (Aligned linearly, typically spaced at a constant interval, e.g., $a = 2\\ {meters}$).
 
 ---
 
