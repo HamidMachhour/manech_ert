@@ -1,13 +1,13 @@
 #!/bin/bash
 
 ###############################################################################
-#                        ERT Station - Setup Script                          #
+#                         ERT Station - Setup Script                          #
 #                                                                             #
 # This script automates the initial setup of the ERT Station project.        #
-# It is designed to be idempotent - safe to run multiple times.             #
+# It is designed to be idempotent - safe to run multiple times.              #
 #                                                                             #
 # Usage:  bash setup.sh                                                      #
-# Or:     chmod +x setup.sh && ./setup.sh                                   #
+# Or:     chmod +x setup.sh && ./setup.sh                                    #
 ###############################################################################
 
 set -e  # Exit on error
@@ -61,8 +61,8 @@ echo ""
 echo "╔════════════════════════════════════════════════════════════════════════╗"
 echo "║           ERT Station - Automated Setup Script                         ║"
 echo "║                                                                        ║"
-echo "║  This script will install and configure the ERT Station project.      ║"
-echo "║  It is safe to run multiple times (idempotent).                       ║"
+echo "║  This script will install and configure the ERT Station project.       ║"
+echo "║  It is safe to run multiple times (idempotent).                        ║"
 echo "╚════════════════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -219,8 +219,8 @@ log_info "Step 5: Installing Python dependencies..."
 if [ -f "${PROJECT_DIR}/requirements.txt" ]; then
     $PYTHON -m pip install --upgrade pip --quiet 2>/dev/null || true
     log_info "Installing packages from requirements.txt..."
-    $PYTHON -m pip install -r "${PROJECT_DIR}/requirements.txt" 2>/dev/null || log_warning "Some Python packages failed to install"
-    log_success "Python dependencies installed"
+    $PYTHON -m pip install -r "${PROJECT_DIR}/requirements.txt"
+    log_success "Python dependencies installed successfully"
 else
     log_warning "requirements.txt not found. Skipping Python dependencies."
 fi
@@ -228,10 +228,38 @@ fi
 echo ""
 
 ###############################################################################
-# Step 6: Database Setup
+# Step 6: Hardware Peripheral System Permissions
 ###############################################################################
 
-log_info "Step 6: Database setup..."
+log_info "Step 6: Optimizing system group hardware permissions..."
+
+# Check if www-data user exists before applying permissions modifications
+if id "www-data" &>/dev/null; then
+    # Add www-data to hardware execution communication groups
+    for group in i2c gpio spi; do
+        if getent group "$group" &>/dev/null; then
+            sudo usermod -aG "$group" www-data 2>/dev/null || log_warning "Could not add www-data to $group group. You may need to run this manually with sudo."
+        fi
+    done
+    
+    # Reload web service processes to instantly flush group profiles
+    if systemctl is-active --quiet php8.4-fpm 2>/dev/null; then
+        sudo systemctl restart php8.4-fpm 2>/dev/null || true
+    elif systemctl is-active --quiet php8.3-fpm 2>/dev/null; then
+        sudo systemctl restart php8.3-fpm 2>/dev/null || true
+    fi
+    log_success "Web server user granted access to physical I2C/SPI pins"
+else
+    log_warning "www-data user not found on this machine. Hardware access mapping skipped."
+fi
+
+echo ""
+
+###############################################################################
+# Step 7: Database Setup
+###############################################################################
+
+log_info "Step 7: Database setup..."
 
 # Parse database credentials from .env
 DB_HOST=$(grep "^DB_HOST=" "$ENV_FILE" | cut -d= -f2)
@@ -249,54 +277,34 @@ if command -v mysql &> /dev/null; then
     if mysql -h "$DB_HOST" -u "$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" -e "SELECT 1" &>/dev/null; then
         log_success "Database connection verified"
         
-        log_info "Running migrations..."
-        php artisan migrate --force 2>/dev/null || log_warning "Migration may have failed. Run: php artisan migrate"
+        log_info "Running database migrations..."
+        php artisan migrate --force
         log_success "Database migrations completed"
-        
-        # Ask to seed database
-        read -p "Would you like to seed the database with sample data? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            php artisan db:seed --force 2>/dev/null || log_warning "Seeding may have failed"
-            log_success "Database seeded"
-        fi
     else
-        log_warning "Could not connect to database. Please verify:"
-        log_warning "  1. MySQL is running"
-        log_warning "  2. Database '$DB_DATABASE' exists"
-        log_warning "  3. User '$DB_USERNAME' has correct password"
-        log_warning ""
-        log_warning "Manual steps:"
-        log_warning "  mysql -u root -p"
-        log_warning "  > CREATE DATABASE $DB_DATABASE CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        log_warning "  > CREATE USER '$DB_USERNAME'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
-        log_warning "  > GRANT ALL PRIVILEGES ON $DB_DATABASE.* TO '$DB_USERNAME'@'localhost';"
-        log_warning "  > FLUSH PRIVILEGES;"
-        log_warning ""
-        log_warning "Then run: php artisan migrate"
+        log_warning "Could not connect to database. Migration skipped."
     fi
 else
-    log_warning "MySQL client not found. You'll need to run migrations manually:"
-    log_warning "  1. Ensure the database exists and is accessible"
-    log_warning "  2. Run: php artisan migrate"
+    log_warning "MySQL client not found. Attempting framework standard migration..."
+    php artisan migrate --force 2>/dev/null || log_warning "Migration skipped: Verify DB setup manually."
 fi
 
 echo ""
 
 ###############################################################################
-# Step 7: Permissions
+# Step 8: Permissions
 ###############################################################################
 
-log_info "Step 7: Setting directory permissions..."
+log_info "Step 8: Setting directory permissions..."
 
-DIRS_TO_CHMOD=("storage" "bootstrap/cache")
+DIRS_TO_CHMOD=("storage" "bootstrap/cache" "venv")
 for dir in "${DIRS_TO_CHMOD[@]}"; do
     if [ -d "${PROJECT_DIR}/$dir" ]; then
-        chmod -R 775 "${PROJECT_DIR}/$dir" 2>/dev/null || true
+        sudo chmod -R 775 "${PROJECT_DIR}/$dir" 2>/dev/null || chmod -R 775 "${PROJECT_DIR}/$dir" 2>/dev/null || true
+        sudo chown -R $USER:www-data "${PROJECT_DIR}/$dir" 2>/dev/null || true
     fi
 done
 
-log_success "Directory permissions set"
+log_success "Directory and virtual environment permissions set"
 echo ""
 
 ###############################################################################
@@ -304,34 +312,10 @@ echo ""
 ###############################################################################
 
 echo "╔════════════════════════════════════════════════════════════════════════╗"
-echo "║                   ✅  Setup Complete!                                 ║"
+echo "║                    ✅  Setup Complete!                                 ║"
 echo "╚════════════════════════════════════════════════════════════════════════╝"
 echo ""
 
 log_success "All setup steps completed successfully!"
 echo ""
-
-log_info "Next steps:"
-echo "  1. Verify .env configuration:"
-echo "     nano .env"
-echo ""
-echo "  2. Start development server:"
-echo "     make dev"
-echo "     Or manually:"
-echo "       Terminal 1: php artisan serve"
-echo "       Terminal 2: php artisan queue:work"
-echo ""
-echo "  3. Access the application:"
-echo "     Open http://localhost:8000 in your browser"
-echo ""
-echo "  4. For more commands, run:"
-echo "     make help"
-echo ""
-
-log_info "Useful documentation:"
-echo "  - README.md - Project documentation"
-echo "  - Makefile - Available commands (run: make help)"
-echo "  - .env.example - Environment variable template"
-echo ""
-
 exit 0
