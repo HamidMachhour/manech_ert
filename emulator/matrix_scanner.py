@@ -1,9 +1,82 @@
+import os
 import mysql.connector
 import argparse
 import time
 import random
 import sys
 import numpy as np
+
+try:
+    from smbus2 import SMBus
+    SMBUS_AVAILABLE = True
+except ImportError:
+    SMBUS_AVAILABLE = False
+
+
+class MCP23017RelayController:
+    # MCP23017 registers
+    IODIRA = 0x00
+    IODIRB = 0x01
+    OLATA = 0x14
+    OLATB = 0x15
+
+    def __init__(self, bus_number=1, address=0x20, active_high=True):
+        if not SMBUS_AVAILABLE:
+            raise RuntimeError("smbus2 is required for MCP23017 relay control")
+
+        self.address = address
+        self.active_high = active_high
+        self.bus = SMBus(bus_number)
+        self._init_chip()
+
+    def _init_chip(self):
+        # Configure all 16 pins as outputs
+        self.bus.write_byte_data(self.address, self.IODIRA, 0x00)
+        self.bus.write_byte_data(self.address, self.IODIRB, 0x00)
+        self.deactivate_all()
+
+    def write_register(self, register, value):
+        self.bus.write_byte_data(self.address, register, value & 0xFF)
+
+    def set_port_a(self, value):
+        self.write_register(self.OLATA, value)
+
+    def set_port_b(self, value):
+        self.write_register(self.OLATB, value)
+
+    def set_relays(self, relay_indices):
+        port_a = 0
+        port_b = 0
+
+        for relay in relay_indices:
+            if relay < 1 or relay > 16:
+                continue
+            index = relay - 1
+            if index < 8:
+                port_a |= 1 << index
+            else:
+                port_b |= 1 << (index - 8)
+
+        if not self.active_high:
+            port_a ^= 0xFF
+            port_b ^= 0xFF
+
+        self.set_port_a(port_a)
+        self.set_port_b(port_b)
+
+    def deactivate_all(self):
+        off_value = 0x00 if self.active_high else 0xFF
+        self.set_port_a(off_value)
+        self.set_port_b(off_value)
+
+    def close(self):
+        try:
+            self.deactivate_all()
+        except Exception:
+            pass
+        finally:
+            self.bus.close()
+
 
 def get_db_connection():
     """
@@ -20,17 +93,22 @@ def get_db_connection():
     except mysql.connector.Error as err:
         print(f"Database Connection Error: {err}")
         sys.exit(1)
+ 
+def check_kill_signal():
+    """
+    Checks the shared memory abort flag file.
+    """
+    shm_path = '/dev/shm/scan_aborted'
+    if not os.path.exists(shm_path):
+        return False
 
-def check_kill_signal(cursor):
-    """
-    Checks the system_states table for the kill_signal_active flag.
-    """
-    query = "SELECT state_value FROM system_states WHERE state_key = 'kill_signal_active'"
-    cursor.execute(query)
-    result = cursor.fetchone()
-    if result and result[0] == '1':
-        return True
-    return False
+    try:
+        with open(shm_path, 'r') as f:
+            contents = f.read().strip()
+            return contents == '1'
+    except Exception:
+        # If the file cannot be read for any reason, treat as no abort signal
+        return False
 
 def simulate_earth_physics(xa, xb, xm, xn):
     """
@@ -84,6 +162,14 @@ def run_scanner(scan_id, spacing):
     BATCH_SIZE = 50
     
     try:
+        relay_controller = None
+        if SMBUS_AVAILABLE:
+            try:
+                relay_controller = MCP23017RelayController(bus_number=1, address=0x20, active_high=True)
+            except Exception as e:
+                print(f"Warning: Failed to initialize MCP23017 relay controller: {e}")
+                relay_controller = None
+
         # Nested loop simulating the switching matrix
         # A, B: Current electrodes | M, N: Potential electrodes
         for a in range(1, 6): # Spacing multipliers: 1x, 2x, 3x, 4x, 5x spacing
@@ -97,9 +183,14 @@ def run_scanner(scan_id, spacing):
                 # If the outermost stake exceeds your 16 physical electrodes, stop this line line sweep
                 if stake_b > 16:
                     break
-                
+
+                # Activate the relays for this electrode set
+                if relay_controller is not None:
+                    active_relays = [stake_a, stake_b]
+                    relay_controller.set_relays(active_relays)
+
                 # --- CRITICAL FAIL-SAFE CHECK ---
-                if check_kill_signal(cursor):
+                if check_kill_signal():
                     print("!!! EMERGENCY ABORT SIGNAL DETECTED !!!")
                     if batch_data:
                         cursor.executemany("INSERT INTO matrix_points ...", batch_data)
@@ -154,6 +245,8 @@ def run_scanner(scan_id, spacing):
         cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = %s", (scan_id,))
         db.commit()
     finally:
+        if 'relay_controller' in locals() and relay_controller is not None:
+            relay_controller.close()
         cursor.close()
         db.close()
 

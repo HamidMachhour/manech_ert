@@ -148,6 +148,15 @@ class ScanController extends Controller
         // 3. Dispatch the asynchronous job
         RunGroundScan::dispatch($scan->id, (float)$validated['electrode_spacing_meters']);
 
+        // Also ensure the shared-memory abort flag is cleared for the new scan
+        $shmPath = '/dev/shm/scan_aborted';
+        try {
+            @file_put_contents($shmPath, '0');
+            @chmod($shmPath, 0666);
+        } catch (\Throwable $e) {
+            // non-fatal: proceed but log in real deployments if desired
+        }
+
         return response()->json([
             'message' => 'Scan initiated successfully',
             'scan_id' => $scan->id
@@ -159,10 +168,30 @@ class ScanController extends Controller
      */
     public function abortScan(): JsonResponse
     {
+        // mark the DB state
         SystemState::updateOrCreate(
             ['state_key' => 'kill_signal_active'],
             ['state_value' => '1']
         );
+
+        // Write the shared-memory abort flag so external processes see it immediately
+        $shmPath = '/dev/shm/scan_aborted';
+        try {
+            @file_put_contents($shmPath, '1');
+            @chmod($shmPath, 0666);
+        } catch (\Throwable $e) {
+            // non-fatal
+        }
+
+        // Optionally update the currently running scan row (if any)
+        try {
+            $running = Scan::where('status', 'running')->latest('updated_at')->first();
+            if ($running) {
+                $running->update(['status' => 'aborted']);
+            }
+        } catch (\Throwable $e) {
+            // ignore
+        }
 
         return response()->json([
             'message' => 'Emergency abort signal sent to hardware controller'
