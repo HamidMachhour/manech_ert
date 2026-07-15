@@ -62,7 +62,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (response.status === 202) {
                 startPolling();
                 elements.startBtn.disabled = true;
-                elements.abortBtn.disabled = false;
             }
         } catch (error) {
             console.error('Error starting scan:', error);
@@ -132,10 +131,8 @@ document.addEventListener('DOMContentLoaded', () => {
             // --- BUTTON STATE MANAGEMENT ---
             if (scan.status === 'running') {
                 elements.startBtn.disabled = true;
-                elements.abortBtn.disabled = false;
             } else if (scan.status === 'completed' || scan.status === 'aborted') {
                 elements.startBtn.disabled = false;
-                elements.abortBtn.disabled = true;
                 if (scan.status === 'completed' || scan.status === 'aborted') {
                     // We don't clear interval here anymore so the UI stays updated 
                     // until the user selects a different project or starts a new scan.
@@ -143,7 +140,6 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 // Pending or other states
                 elements.startBtn.disabled = false;
-                elements.abortBtn.disabled = true;
             }
 
         } catch (error) {

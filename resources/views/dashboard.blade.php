@@ -69,7 +69,7 @@
                         </div>
                         <div style="display: flex; gap: 10px;">
                             <button type="submit" id="start-btn" class="btn btn-primary">START SCAN</button>
-                            <button type="button" id="abort-btn" class="btn btn-danger" disabled>EMERGENCY ABORT</button>
+                            <button type="button" id="abort-btn" class="btn btn-danger">EMERGENCY ABORT</button>
                         </div>
                     </form>
                 </div>
