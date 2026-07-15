@@ -1,11 +1,12 @@
 import os
-import mysql.connector
+import sqlite3
 import argparse
 import time
 import random
 import sys
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(SCRIPT_DIR)
 
 try:
     from ert_matrix_controller import ErtMatrixController
@@ -14,18 +15,16 @@ except ImportError:
 
 def get_db_connection():
     """
-    Establishes a connection to the MySQL database.
-    In a real production environment, these would be loaded from environment variables.
+    Establishes a connection to an SQLite database file.
     """
+    db_path = os.path.normpath(os.path.join(SCRIPT_DIR, '..', 'database', 'database.sqlite'))
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+
     try:
-        return mysql.connector.connect(
-            host="10.0.0.11",
-            port=3306,
-            user="ert_user",
-            password="12341234",
-            database="ert_station"
-        )
-    except mysql.connector.Error as err:
+        connection = sqlite3.connect(db_path, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        return connection
+    except sqlite3.Error as err:
         print(f"Database Connection Error: {err}")
         sys.exit(1)
  
@@ -75,7 +74,7 @@ def run_scanner(scan_id, spacing):
     print(f"Starting scan {scan_id} with spacing {spacing}m...")
 
     # Verify scan exists to avoid Foreign Key errors
-    cursor.execute("SELECT id FROM scans WHERE id = %s", (scan_id,))
+    cursor.execute("SELECT id FROM scans WHERE id = ?", (scan_id,))
     if not cursor.fetchone():
         print(f"Error: Scan ID {scan_id} not found in database. Exiting.")
         cursor.close()
@@ -120,9 +119,15 @@ def run_scanner(scan_id, spacing):
                 if check_kill_signal():
                     print("!!! EMERGENCY ABORT SIGNAL DETECTED !!!")
                     if batch_data:
-                        cursor.executemany("INSERT INTO matrix_points ...", batch_data)
+                        cursor.executemany(
+                            """
+                            INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            batch_data
+                        )
                         db.commit()
-                    cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = %s", (scan_id,))
+                    cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = ?", (scan_id,))
                     db.commit()
                     return
 
@@ -148,7 +153,7 @@ def run_scanner(scan_id, spacing):
                 if len(batch_data) >= BATCH_SIZE:
                     cursor.executemany("""
                         INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, batch_data)
                     db.commit()
                     batch_data = []
@@ -158,18 +163,18 @@ def run_scanner(scan_id, spacing):
         if batch_data:
             cursor.executemany("""
                 INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, batch_data)
             db.commit()
 
         # Mark scan as completed if loop finishes naturally
-        cursor.execute("UPDATE scans SET status = 'completed' WHERE id = %s", (scan_id,))
+        cursor.execute("UPDATE scans SET status = 'completed' WHERE id = ?", (scan_id,))
         db.commit()
         print("Scan completed successfully.")
 
     except Exception as e:
         print(f"Runtime Error: {e}")
-        cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = %s", (scan_id,))
+        cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = ?", (scan_id,))
         db.commit()
     finally:
         if 'matrix_controller' in locals() and matrix_controller is not None:
