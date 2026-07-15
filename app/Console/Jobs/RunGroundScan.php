@@ -31,7 +31,7 @@ class RunGroundScan implements ShouldQueue
         $scan->update(['status' => 'running']);
 
         // Execute the Python emulator script using the virtual environment's python executable
-        $projectRoot = '.';
+        $projectRoot = '/var/www/manech_ert'; // Adjust this path as necessary
         $pythonPath = $projectRoot . '/venv/bin/python3';
         $scannerScript = $projectRoot . '/emulator/matrix_scanner.py';
 
