@@ -5,11 +5,12 @@ import time
 import random
 import sys
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 try:
     from ert_matrix_controller import ErtMatrixController
 except ImportError:
     ErtMatrixController = None
-
 
 def get_db_connection():
     """
