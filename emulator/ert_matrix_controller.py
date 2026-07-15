@@ -5,7 +5,7 @@ import spidev
 
 class ErtMatrixController:
     """
-    Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander
+    Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander (Active-Low Relays)
     and synchronizes a 16-LED WS2812B strip using raw spidev native byte-arrays.
     """
     
@@ -15,7 +15,7 @@ class ErtMatrixController:
     GPIOA  = 0x12   
     GPIOB  = 0x13   
 
-    def __init__(self, i2c_bus_id=0, mcp_address=0x20, led_count=16):
+    def __init__(self, i2c_bus_id=1, mcp_address=0x20, led_count=16):
         self.mcp_address = mcp_address
         self.led_count = led_count
         self.hardware_present = False
@@ -23,9 +23,13 @@ class ErtMatrixController:
         
         # 1. Initialize SMBus2 for MCP23017
         try:
+            # Changement par défaut sur le Bus 1 (I2C standard sur Orange Pi / Raspberry Pi)
             self.bus = smbus2.SMBus(i2c_bus_id)
+            
+            # Configure tous les pins du Port A et B en SORTIES (0 = Output)
             self.bus.write_byte_data(self.mcp_address, self.IODIRA, 0x00)
             self.bus.write_byte_data(self.mcp_address, self.IODIRB, 0x00)
+            
             self.hardware_present = True
             print(" -> [OK] Physical MCP23017 detected and initialized.")
         except OSError:
@@ -46,7 +50,7 @@ class ErtMatrixController:
         # 3. Create a plain Python list for tracking colors
         self.led_list = [[0, 0, 0] for _ in range(self.led_count)]
         
-        # 4. Initial system flush
+        # 4. Initial system flush (Forcera l'extinction des relais et des LEDs au démarrage)
         self.clear_all()
 
     def _send_to_led_strip(self):
@@ -75,27 +79,35 @@ class ErtMatrixController:
         self._send_to_led_strip()
 
     def clear_all(self):
-        """Safely isolates both the relays and completely clears the LED strip."""
-        # Use our new explicit function to drop the lights to black
+        """Safely isolates both the relays (Set HIGH for Active-Low) and clears the LED strip."""
+        # Drop the lights to black
         self.clear_strip()
 
-        # Isolate physical hardware relay lines
+        # Isolate physical hardware relay lines (Active-Low: 0xFF / 11111111 = Relays Off)
         if self.hardware_present:
             try:
-                self.bus.write_byte_data(self.mcp_address, self.GPIOA, 0x00)
-                self.bus.write_byte_data(self.mcp_address, self.GPIOB, 0x00)
+                self.bus.write_byte_data(self.mcp_address, self.GPIOA, 0xFF)
+                self.bus.write_byte_data(self.mcp_address, self.GPIOB, 0xFF)
             except OSError as e:
                 print(f" -> Hardware connection lost during clear operation: {e}")
         else:
-            print("    [SIM HARDWARE] Matrix Open Isolation: All 16 relay pins forced LOW (0x00).")
+            print("    [SIM HARDWARE] Matrix Open Isolation: All 16 relay pins forced HIGH (0xFF - Off).")
 
     def _write_to_relays(self, combined_16bit_word):
+        """
+        Writes a 16-bit word to the GPIO registers. 
+        Applies bitwise NOT (~) because the relay board is Active-Low.
+        """
+        # Inversion logique pour carte relais active à l'état bas : 
+        # Un bit à 1 dans le "combined_16bit_word" doit envoyer un 0V (0) physique au relais.
+        active_low_word = (~combined_16bit_word) & 0xFFFF
+        
         if not self.hardware_present:
-            print(f"    [SIM HARDWARE] Relay Register Word Sent: {combined_16bit_word:016b}")
+            print(f"    [SIM HARDWARE] Relay Register Word Sent (Active-Low inverted): {active_low_word:016b}")
             return
             
-        byte_A = combined_16bit_word & 0xFF        
-        byte_B = (combined_16bit_word >> 8) & 0xFF 
+        byte_A = active_low_word & 0xFF        
+        byte_B = (active_low_word >> 8) & 0xFF 
         
         try:
             self.bus.write_byte_data(self.mcp_address, self.GPIOA, byte_A)
@@ -113,16 +125,16 @@ class ErtMatrixController:
             return 0
 
         if elec % 2 == 1:
-            # odd electrode -> GPIOA, bit index 0..7 for electrodes 1,3,...,15
+            # Odd electrode -> GPIOA, bit index 0..7 for electrodes 1,3,...,15
             index = (elec - 1) // 2
             return 1 << index
         else:
-            # even electrode -> GPIOB, bit index 8..15 for electrodes 2,4,...,16
+            # Even electrode -> GPIOB, bit index 8..15 for electrodes 2,4,...,16
             index = (elec // 2) - 1
             return 1 << (8 + index)
 
     def activate_injection_quad(self, elec_A, elec_B):
-        """Sets LEDs (A, B) to RED, closes injection relays."""
+        """Sets LEDs (A, B) to RED, closes injection relays (Active-Low)."""
         print(f"\n[Command] Activating Injection Quad on Electrodes A={elec_A}, B={elec_B}")
         self.clear_all()  
         time.sleep(0.01)  
@@ -130,12 +142,13 @@ class ErtMatrixController:
         self.led_list[elec_A - 1] = [255, 0, 0]  # Red
         self.led_list[elec_B - 1] = [255, 0, 0]  
         self._send_to_led_strip()
-        # Build combined 16-bit mask honoring wiring: odds->GPIOA, evens->GPIOB
+        
+        # Build combined 16-bit mask: odds->GPIOA, evens->GPIOB
         combined = self._electrode_bitmask(elec_A) | self._electrode_bitmask(elec_B)
         self._write_to_relays(combined)
 
     def activate_measurement_quad(self, elec_M, elec_N):
-        """Sets LEDs (M, N) to GREEN, closes potential reading relays."""
+        """Sets LEDs (M, N) to GREEN, closes potential reading relays (Active-Low)."""
         print(f"\n[Command] Activating Measurement Quad on Electrodes M={elec_M}, N={elec_N}")
         self.clear_all()  
         time.sleep(0.01)
@@ -143,7 +156,8 @@ class ErtMatrixController:
         self.led_list[elec_M - 1] = [0, 255, 0]  # Green
         self.led_list[elec_N - 1] = [0, 255, 0]  
         self._send_to_led_strip()
-        # Build combined 16-bit mask honoring wiring: odds->GPIOA, evens->GPIOB
+        
+        # Build combined 16-bit mask: odds->GPIOA, evens->GPIOB
         combined = self._electrode_bitmask(elec_M) | self._electrode_bitmask(elec_N)
         self._write_to_relays(combined)
 
@@ -156,8 +170,9 @@ class ErtMatrixController:
         print("\n -> [INFO] ERT Controller hardware instances safely released.")
 
 if __name__ == "__main__":
-    print("Testing Ultra-Lightweight Inline SPI Driver (No NumPy)...")
-    matrix = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
+    print("Testing Ultra-Lightweight Inline SPI Driver with Active-Low Relays...")
+    # Changé l'I2C bus ID par défaut à 1 (souvent utilisé sur cartes Armbian/Pi)
+    matrix = ErtMatrixController(i2c_bus_id=1, mcp_address=0x20)
     try:
         matrix.activate_injection_quad(1, 4)
         time.sleep(1.5)
