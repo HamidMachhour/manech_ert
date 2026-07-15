@@ -4,7 +4,6 @@ import argparse
 import time
 import random
 import sys
-import numpy as np
 
 try:
     from ert_matrix_controller import ErtMatrixController
@@ -58,14 +57,14 @@ def simulate_earth_physics(xa, xb, xm, xn):
     
     # Simulate a high-conductivity water-saturated aquifer starting at 2 meters deep
     if pseudo_depth > 2.0:
-        return 15.0 + np.random.normal(0, 0.5) # Low resistivity for water table
+        return 15.0 + random.gauss(0, 0.5) # Low resistivity for water table
         
     # Simulate an isolated wet clay anomaly at a specific horizontal point
     if 5.0 < center_x < 10.0 and 0.5 < pseudo_depth < 1.5:
-        return 8.0 + np.random.normal(0, 0.2)
+        return 8.0 + random.gauss(0, 0.2)
         
     # Return standard soil with minor natural field noise
-    return base_resistivity + np.random.normal(0, 2.0)
+    return base_resistivity + random.gauss(0, 2.0)
 
 
 def run_scanner(scan_id, spacing):
