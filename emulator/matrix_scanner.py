@@ -19,7 +19,8 @@ def get_db_connection():
     """
     try:
         return mysql.connector.connect(
-            host="127.0.0.1",
+            host="10.0.0.11",
+            port=3306,
             user="ert_user",
             password="12341234",
             database="ert_station"
@@ -66,15 +67,6 @@ def simulate_earth_physics(xa, xb, xm, xn):
     # Return standard soil with minor natural field noise
     return base_resistivity + np.random.normal(0, 2.0)
 
-def simulate_measurement(spacing):
-    """
-    Simulates a voltage drop and current injection based on synthetic earth physics.
-    """
-    # Get the target apparent resistivity from the physics model
-    # Note: In the current emulator, we don't have the electrode indices here, 
-    # so we'll pass them from the run_scanner loop.
-    # For now, we'll return a base value and let run_scanner handle the physics.
-    return 100.0, 1.0, 100.0
 
 def run_scanner(scan_id, spacing):
     db = get_db_connection()
