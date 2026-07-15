@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+import time
+import smbus2
+import spidev
+
+class ErtMatrixController:
+    """
+    Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander
+    and synchronizes a 16-LED WS2812B strip while bypassing a broken first pixel.
+    """
+    
+    # MCP23017 Register Addresses
+    IODIRA = 0x00   
+    IODIRB = 0x01   
+    GPIOA  = 0x12   
+    GPIOB  = 0x13   
+
+    def __init__(self, i2c_bus_id=0, mcp_address=0x20, led_count=16):
+        self.mcp_address = mcp_address
+        self.led_count = led_count
+        self.hardware_present = False
+        self.spi_present = False
+        
+        # 1. Initialize SMBus2 for MCP23017
+        try:
+            self.bus = smbus2.SMBus(i2c_bus_id)
+            self.bus.write_byte_data(self.mcp_address, self.IODIRA, 0x00)
+            self.bus.write_byte_data(self.mcp_address, self.IODIRB, 0x00)
+            self.hardware_present = True
+            print(" -> [OK] Physical MCP23017 detected and initialized.")
+        except OSError:
+            self.hardware_present = False
+            print(" -> [SIMULATION] No physical I2C device found. Running in offline test mode.")
+        
+        # 2. Initialize Hardware SPI via spidev for WS2812B
+        try:
+            self.spi = spidev.SpiDev()
+            self.spi.open(0, 0)
+            self.spi.max_speed_hz = 6400000
+            self.spi_present = True
+            print(" -> [OK] Hardware SPI bus successfully mapped.")
+        except Exception:
+            self.spi_present = False
+            print(" -> [SIMULATION] SPI Bus not accessible. Simulating LED outputs.")
+        
+        # 3. Create a plain Python list for tracking colors
+        self.led_list = [[0, 0, 0] for _ in range(self.led_count)]
+        
+        # 4. Initial system flush
+        self.clear_all()
+
+    def _send_to_led_strip(self):
+        """Translates color list into raw SPI pulses while offsetting for the broken pixel."""
+        if not self.spi_present:
+            print(f"    [SIM LIGHTS] Active LED Color Map (Stakes 1-16): {self.led_list}")
+            return
+            
+        spi_data = []
+        
+        # --- THE BYPASS HACK ---
+        # Add a dummy black pixel at the start of the transmission array.
+        # This will be pushed into the broken physical LED 1, making LEDs 2-17 show your actual stakes!
+        effective_list = [[0, 0, 0]] + self.led_list
+        
+        for rgb in effective_list:
+            r, g, b = rgb[0], rgb[1], rgb[2]
+            for byte in (g, r, b):
+                for bit in range(8):
+                    if (byte >> (7 - bit)) & 1:
+                        spi_data.append(0b11110000)
+                    else:
+                        spi_data.append(0b11000000)
+        try:
+            self.spi.xfer2(spi_data)
+        except OSError as e:
+            print(f" -> SPI write execution failure: {e}")
+
+    def clear_strip(self):
+        """Dedicated function to turn off all pixels on the LED strip."""
+        self.led_list = [[0, 0, 0] for _ in range(self.led_count)]
+        self._send_to_led_strip()
+
+    def clear_all(self):
+        """Safely isolates both the relays and completely clears the LED strip."""
+        self.clear_strip()
+
+        if self.hardware_present:
+            try:
+                self.bus.write_byte_data(self.mcp_address, self.GPIOA, 0x00)
+                self.bus.write_byte_data(self.mcp_address, self.GPIOB, 0x00)
+            except OSError as e:
+                print(f" -> Hardware connection lost during clear operation: {e}")
+        else:
+            print("    [SIM HARDWARE] Matrix Open Isolation: All 16 relay pins forced LOW (0x00).")
+
+    def _write_to_relays(self, combined_16bit_word):
+        if not self.hardware_present:
+            print(f"    [SIM HARDWARE] Relay Register Word Sent: {combined_16bit_word:016b}")
+            return
+            
+        byte_A = combined_16bit_word & 0xFF        
+        byte_B = (combined_16bit_word >> 8) & 0xFF 
+        
+        try:
+            self.bus.write_byte_data(self.mcp_address, self.GPIOA, byte_A)
+            self.bus.write_byte_data(self.mcp_address, self.GPIOB, byte_B)
+        except OSError as e:
+            print(f" -> Hardware communication lost during write sequence: {e}")
+
+    def activate_injection_quad(self, elec_A, elec_B):
+        """Sets LEDs (A, B) to RED, closes injection relays."""
+        print(f"\n[Command] Activating Injection Quad on Electrodes A={elec_A}, B={elec_B}")
+        self.clear_all()  
+        time.sleep(0.01)  
+        
+        self.led_list[elec_A - 1] = [255, 0, 0]  # Red
+        self.led_list[elec_B - 1] = [255, 0, 0]  
+        self._send_to_led_strip()
+        
+        mask_A = 1 << (elec_A - 1)
+        mask_B = 1 << (elec_B - 1)
+        self._write_to_relays(mask_A | mask_B)
+
+    def activate_measurement_quad(self, elec_M, elec_N):
+        """Sets LEDs (M, N) to GREEN, closes potential reading relays."""
+        print(f"\n[Command] Activating Measurement Quad on Electrodes M={elec_M}, N={elec_N}")
+        self.clear_all()  
+        time.sleep(0.01)
+        
+        self.led_list[elec_M - 1] = [0, 255, 0]  # Green
+        self.led_list[elec_N - 1] = [0, 255, 0]  
+        self._send_to_led_strip()
+        
+        mask_M = 1 << (elec_M - 1)
+        mask_N = 1 << (elec_N - 1)
+        self._write_to_relays(mask_M | mask_N)
+
+    def close(self):
+        self.clear_all()
+        if self.hardware_present:
+            self.bus.close()
+        if self.spi_present:
+            self.spi.close()
+        print("\n -> [INFO] ERT Controller hardware instances safely released.")
+
+if __name__ == "__main__":
+    print("Testing Ultra-Lightweight Inline SPI Driver (No NumPy)...")
+    matrix = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
+    try:
+        matrix.activate_injection_quad(1, 4)
+        time.sleep(1.5)
+        matrix.activate_measurement_quad(2, 3)
+        time.sleep(1.5)
+    finally:
+        matrix.close()
