@@ -7,75 +7,9 @@ import sys
 import numpy as np
 
 try:
-    from smbus2 import SMBus
-    SMBUS_AVAILABLE = True
+    from ert_matrix_controller import ErtMatrixController
 except ImportError:
-    SMBUS_AVAILABLE = False
-
-
-class MCP23017RelayController:
-    # MCP23017 registers
-    IODIRA = 0x00
-    IODIRB = 0x01
-    OLATA = 0x14
-    OLATB = 0x15
-
-    def __init__(self, bus_number=1, address=0x20, active_high=True):
-        if not SMBUS_AVAILABLE:
-            raise RuntimeError("smbus2 is required for MCP23017 relay control")
-
-        self.address = address
-        self.active_high = active_high
-        self.bus = SMBus(bus_number)
-        self._init_chip()
-
-    def _init_chip(self):
-        # Configure all 16 pins as outputs
-        self.bus.write_byte_data(self.address, self.IODIRA, 0x00)
-        self.bus.write_byte_data(self.address, self.IODIRB, 0x00)
-        self.deactivate_all()
-
-    def write_register(self, register, value):
-        self.bus.write_byte_data(self.address, register, value & 0xFF)
-
-    def set_port_a(self, value):
-        self.write_register(self.OLATA, value)
-
-    def set_port_b(self, value):
-        self.write_register(self.OLATB, value)
-
-    def set_relays(self, relay_indices):
-        port_a = 0
-        port_b = 0
-
-        for relay in relay_indices:
-            if relay < 1 or relay > 16:
-                continue
-            index = relay - 1
-            if index < 8:
-                port_a |= 1 << index
-            else:
-                port_b |= 1 << (index - 8)
-
-        if not self.active_high:
-            port_a ^= 0xFF
-            port_b ^= 0xFF
-
-        self.set_port_a(port_a)
-        self.set_port_b(port_b)
-
-    def deactivate_all(self):
-        off_value = 0x00 if self.active_high else 0xFF
-        self.set_port_a(off_value)
-        self.set_port_b(off_value)
-
-    def close(self):
-        try:
-            self.deactivate_all()
-        except Exception:
-            pass
-        finally:
-            self.bus.close()
+    ErtMatrixController = None
 
 
 def get_db_connection():
@@ -162,13 +96,13 @@ def run_scanner(scan_id, spacing):
     BATCH_SIZE = 50
     
     try:
-        relay_controller = None
-        if SMBUS_AVAILABLE:
+        matrix_controller = None
+        if ErtMatrixController is not None:
             try:
-                relay_controller = MCP23017RelayController(bus_number=1, address=0x20, active_high=True)
+                matrix_controller = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
             except Exception as e:
-                print(f"Warning: Failed to initialize MCP23017 relay controller: {e}")
-                relay_controller = None
+                print(f"Warning: Failed to initialize ERT matrix controller: {e}")
+                matrix_controller = None
 
         # Nested loop simulating the switching matrix
         # A, B: Current electrodes | M, N: Potential electrodes
@@ -184,10 +118,11 @@ def run_scanner(scan_id, spacing):
                 if stake_b > 16:
                     break
 
-                # Activate the relays for this electrode set
-                if relay_controller is not None:
-                    active_relays = [stake_a, stake_b]
-                    relay_controller.set_relays(active_relays)
+                # Activate the injection quad for this electrode set
+                if matrix_controller is not None:
+                    matrix_controller.activate_injection_quad(stake_a, stake_b)
+                else:
+                    print(f"[SIM] Activating injection relays for electrodes {stake_a} and {stake_b}")
 
                 # --- CRITICAL FAIL-SAFE CHECK ---
                 if check_kill_signal():
@@ -245,8 +180,8 @@ def run_scanner(scan_id, spacing):
         cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = %s", (scan_id,))
         db.commit()
     finally:
-        if 'relay_controller' in locals() and relay_controller is not None:
-            relay_controller.close()
+        if 'matrix_controller' in locals() and matrix_controller is not None:
+            matrix_controller.close()
         cursor.close()
         db.close()
 
