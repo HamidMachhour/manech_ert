@@ -103,6 +103,24 @@ class ErtMatrixController:
         except OSError as e:
             print(f" -> Hardware communication lost during write sequence: {e}")
 
+    def _electrode_bitmask(self, elec: int) -> int:
+        """
+        Map a 1-based electrode number (1..16) to the combined 16-bit register
+        word where GPIOA holds odd electrodes (1,3,5...) in bits 0..7 and
+        GPIOB holds even electrodes (2,4,6...) in bits 8..15.
+        """
+        if elec < 1 or elec > 16:
+            return 0
+
+        if elec % 2 == 1:
+            # odd electrode -> GPIOA, bit index 0..7 for electrodes 1,3,...,15
+            index = (elec - 1) // 2
+            return 1 << index
+        else:
+            # even electrode -> GPIOB, bit index 8..15 for electrodes 2,4,...,16
+            index = (elec // 2) - 1
+            return 1 << (8 + index)
+
     def activate_injection_quad(self, elec_A, elec_B):
         """Sets LEDs (A, B) to RED, closes injection relays."""
         print(f"\n[Command] Activating Injection Quad on Electrodes A={elec_A}, B={elec_B}")
@@ -112,10 +130,9 @@ class ErtMatrixController:
         self.led_list[elec_A - 1] = [255, 0, 0]  # Red
         self.led_list[elec_B - 1] = [255, 0, 0]  
         self._send_to_led_strip()
-        
-        mask_A = 1 << (elec_A - 1)
-        mask_B = 1 << (elec_B - 1)
-        self._write_to_relays(mask_A | mask_B)
+        # Build combined 16-bit mask honoring wiring: odds->GPIOA, evens->GPIOB
+        combined = self._electrode_bitmask(elec_A) | self._electrode_bitmask(elec_B)
+        self._write_to_relays(combined)
 
     def activate_measurement_quad(self, elec_M, elec_N):
         """Sets LEDs (M, N) to GREEN, closes potential reading relays."""
@@ -126,10 +143,9 @@ class ErtMatrixController:
         self.led_list[elec_M - 1] = [0, 255, 0]  # Green
         self.led_list[elec_N - 1] = [0, 255, 0]  
         self._send_to_led_strip()
-        
-        mask_M = 1 << (elec_M - 1)
-        mask_N = 1 << (elec_N - 1)
-        self._write_to_relays(mask_M | mask_N)
+        # Build combined 16-bit mask honoring wiring: odds->GPIOA, evens->GPIOB
+        combined = self._electrode_bitmask(elec_M) | self._electrode_bitmask(elec_N)
+        self._write_to_relays(combined)
 
     def close(self):
         self.clear_all()
