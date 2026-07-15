@@ -8,7 +8,6 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Process\Process as SymfonyProcess;
 
@@ -32,7 +31,10 @@ class RunGroundScan implements ShouldQueue
         $scan->update(['status' => 'running']);
 
         // Execute the Python emulator script using the virtual environment's python executable
-        $pythonPath = 'venv/bin/python3';
+        $projectRoot = '.';
+        $pythonPath = $projectRoot . '/venv/bin/python3';
+        $scannerScript = $projectRoot . '/emulator/matrix_scanner.py';
+
         // Ensure shared memory flag exists and is writable by both web/worker users
         $shmPath = '/dev/shm/scan_aborted';
         if (!file_exists($shmPath)) {
@@ -43,12 +45,12 @@ class RunGroundScan implements ShouldQueue
         // Launch the Python process and poll the abort signal while it's running
         $command = [
             $pythonPath,
-            'emulator/matrix_scanner.py',
+            $scannerScript,
             '--scan_id=' . $this->scanId,
             '--spacing=' . $this->spacing,
         ];
 
-        $process = new SymfonyProcess($command);
+        $process = new SymfonyProcess($command, $projectRoot);
         $process->setTimeout(3600);
         $process->start();
 
