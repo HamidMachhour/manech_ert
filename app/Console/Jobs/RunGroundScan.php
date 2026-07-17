@@ -50,7 +50,18 @@ class RunGroundScan implements ShouldQueue
             '--spacing=' . $this->spacing,
         ];
 
+        // When the queue worker runs under a different service user, it may not have
+        // direct hardware access. Try sudo as a fallback so the script runs with the
+        // same privileges as the manual shell session when the service is configured for it.
+        if (function_exists('posix_getuid') && posix_getuid() !== 0 && is_executable('/usr/bin/sudo')) {
+            $command = array_merge(['sudo', '-n'], $command);
+        }
+
         $process = new SymfonyProcess($command, $projectRoot);
+        $process->setEnv([
+            'PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+            'HOME' => getenv('HOME') ?: $projectRoot,
+        ]);
         $process->setTimeout(3600);
         $process->start();
 

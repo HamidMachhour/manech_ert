@@ -21,21 +21,27 @@ class ErtMatrixController:
         self.led_count = led_count
         self.hardware_present = False
         self.spi_present = False
+        self.bus = None
         
         # 1. Initialize SMBus2 for MCP23017
-        try:
-            # Changement par défaut sur le Bus 1 (I2C standard sur Orange Pi / Raspberry Pi)
-            self.bus = smbus2.SMBus(i2c_bus_id)
-            
-            # Configure tous les pins du Port A et B en SORTIES (0 = Output)
-            self.bus.write_byte_data(self.mcp_address, self.IODIRA, 0x00)
-            self.bus.write_byte_data(self.mcp_address, self.IODIRB, 0x00)
-            
-            self.hardware_present = True
-            print(" -> [OK] Physical MCP23017 detected and initialized.")
-        except OSError:
-            self.hardware_present = False
-            print(" -> [SIMULATION] No physical I2C device found. Running in offline test mode.")
+        last_i2c_error = None
+        for bus_id in [i2c_bus_id, 1, 0]:
+            try:
+                self.bus = smbus2.SMBus(bus_id)
+                
+                # Configure tous les pins du Port A et B en SORTIES (0 = Output)
+                self.bus.write_byte_data(self.mcp_address, self.IODIRA, 0x00)
+                self.bus.write_byte_data(self.mcp_address, self.IODIRB, 0x00)
+                
+                self.hardware_present = True
+                print(f" -> [OK] Physical MCP23017 detected and initialized on I2C bus {bus_id}.")
+                break
+            except Exception as exc:
+                last_i2c_error = exc
+                print(f" -> [WARN] I2C bus {bus_id} unavailable: {exc}")
+
+        if not self.hardware_present:
+            print(f" -> [SIMULATION] No physical I2C device found. Running in offline test mode. Last error: {last_i2c_error}")
         
         # 2. Initialize Hardware SPI via spidev for WS2812B
         try:
