@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import sqlite3
 import argparse
@@ -41,29 +42,24 @@ def check_kill_signal():
             contents = f.read().strip()
             return contents == '1'
     except Exception:
-        # If the file cannot be read for any reason, treat as no abort signal
         return False
 
 def simulate_earth_physics(xa, xb, xm, xn):
     """
     Simulates subsurface resistivity based on pseudo-location and depth.
+    Used ONLY when physical hardware is entirely absent.
     """
-    # Calculate approximate pseudo-location and pseudo-depth of the current reading
     center_x = (xa + xb + xm + xn) / 4.0
-    pseudo_depth = abs(xb - xa) * 0.195  # Standard geometric depth approximation
+    pseudo_depth = abs(xb - xa) * 0.195  
     
-    # Base background soil resistivity (Dry upper layer)
     base_resistivity = 150.0 
     
-    # Simulate a high-conductivity water-saturated aquifer starting at 2 meters deep
     if pseudo_depth > 2.0:
-        return 15.0 + random.gauss(0, 0.5) # Low resistivity for water table
+        return 15.0 + random.gauss(0, 0.5) 
         
-    # Simulate an isolated wet clay anomaly at a specific horizontal point
     if 5.0 < center_x < 10.0 and 0.5 < pseudo_depth < 1.5:
         return 8.0 + random.gauss(0, 0.2)
         
-    # Return standard soil with minor natural field noise
     return base_resistivity + random.gauss(0, 2.0)
 
 
@@ -81,8 +77,6 @@ def run_scanner(scan_id, spacing):
         db.close()
         return
 
-    # Simulate 16 electrodes
-    electrodes = range(1, 17) # For testing, we use 4 electrodes to keep the output manageable
     batch_data = []
     BATCH_SIZE = 50
     
@@ -95,29 +89,30 @@ def run_scanner(scan_id, spacing):
                 print(f"Warning: Failed to initialize ERT matrix controller: {e}")
                 matrix_controller = None
 
-        # Nested loop simulating the switching matrix
-        # A, B: Current electrodes | M, N: Potential electrodes
+        # Nested loop running the Wenner profile sequence
         for a in range(1, 6): # Spacing multipliers: 1x, 2x, 3x, 4x, 5x spacing
             for i in range(1, 17):
-                # Calculate the 4 exact stake positions for a Wenner sequence
                 stake_a = i
                 stake_m = i + a
                 stake_n = i + 2 * a
                 stake_b = i + 3 * a
                 
-                # If the outermost stake exceeds your 16 physical electrodes, stop this line line sweep
                 if stake_b > 16:
                     break
 
-                # Activate the injection and measurement relay states for this electrode set.
-                # The controller resets the relay state on each call, so we issue the
-                # injection step first and the measurement step immediately after.
+                # --- SÉQUENCEMENT PHYSIQUE DE L'INJECTION ET DE LA MESURE ---
                 if matrix_controller is not None:
+                    # 1. Activation de la ligne de puissance (A, B) et attente de stabilisation de la source
                     matrix_controller.activate_injection_quad(stake_a, stake_b)
+                    time.sleep(0.1) 
+                    
+                    # 2. Ouverture des lignes de lecture du potentiel (M, N) et stabilisation des relais
                     matrix_controller.activate_measurement_quad(stake_m, stake_n)
+                    time.sleep(0.1) 
                 else:
                     print(f"[SIM] Activating injection relays for electrodes {stake_a} and {stake_b}")
                     print(f"[SIM] Activating measurement relays for electrodes {stake_m} and {stake_n}")
+                    time.sleep(0.2)
 
                 # --- CRITICAL FAIL-SAFE CHECK ---
                 if check_kill_signal():
@@ -135,36 +130,36 @@ def run_scanner(scan_id, spacing):
                     db.commit()
                     return
 
-                # Simulate hardware relay latency bounce
-                time.sleep(0.1)
-
-                # Read real ADC values from the ADS1115 if available.
-                voltage_volts = None
-                current_ma = None
+                # --- LECTURE ET TRAITEMENT DES DONNÉES ---
                 if matrix_controller is not None:
+                    # Lecture directe depuis l'ADS1115
                     voltage_volts, current_ma = matrix_controller.read_adc()
+                    
+                    # Remplacement des valeurs None par 0.0 en cas d'erreur de communication I2C ponctuelle
+                    if voltage_volts is None: voltage_volts = 0.0
+                    if current_ma is None: current_ma = 0.0
 
-                if voltage_volts is None or current_ma is None:
-                    # Fall back to the previous pseudo-physics model when ADC support is unavailable.
+                    voltage = voltage_volts
+                    current = current_ma / 1000.0  # Conversion mA en Ampères pour la loi d'Ohm
+
+                    # Formule Wenner : rho = 2 * pi * a * V / I
+                    # Seuil minimal de sécurité pour éviter la division par zéro (bruit de fond à vide)
+                    if abs(current) > 1e-6:
+                        rho = (2 * 3.141592653589793 * spacing * voltage) / current
+                    else:
+                        rho = 0.0
+                else:
+                    # MODE HORS-LIGNE COMPLET : Utilisation de la simulation physique
                     xa = stake_a * spacing
                     xb = stake_b * spacing
                     xm = stake_m * spacing
                     xn = stake_n * spacing
+                    
                     rho = simulate_earth_physics(xa, xb, xm, xn)
-                    current = 1.0 + random.uniform(-0.005, 0.005)
-                    voltage = rho * current * 0.1
-                else:
-                    # Convert the measured voltage and current into apparent resistivity.
-                    # Use the Wenner geometry: rho = 2 * pi * spacing * V / I
-                    # when the measured current is non-zero.
-                    if abs(current_ma) > 1e-9:
-                        rho = (2 * 3.141592653589793 * spacing * voltage_volts) / (current_ma / 1000.0)
-                    else:
-                        rho = 0.0
-                    current = current_ma / 1000.0
-                    voltage = voltage_volts
+                    current = (1.0 + random.uniform(-0.005, 0.005)) * 0.1  # ~100mA simulés
+                    voltage = (rho * current) / (2 * 3.141592653589793 * spacing)
 
-                # Append to active batch
+                # Ajout de la ligne au lot en cours
                 batch_data.append((scan_id, stake_a, stake_b, stake_m, stake_n, voltage, current, rho))
                 
                 if len(batch_data) >= BATCH_SIZE:
@@ -174,9 +169,9 @@ def run_scanner(scan_id, spacing):
                     """, batch_data)
                     db.commit()
                     batch_data = []
-                    print(f"Wenner Bound Committed: A:{stake_a} M:{stake_m} N:{stake_n} B:{stake_b} | Rho: {rho:.2f}")
+                    print(f"Wenner Bound Committed: A:{stake_a} M:{stake_m} N:{stake_n} B:{stake_b} | Rho: {rho:.2f} Ohm.m (I: {current*1000:.1f} mA, V: {voltage:.4f} V)")
 
-        # Final commit for any remaining data in the batch
+        # Validation finale des points restants
         if batch_data:
             cursor.executemany("""
                 INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
@@ -184,7 +179,6 @@ def run_scanner(scan_id, spacing):
             """, batch_data)
             db.commit()
 
-        # Mark scan as completed if loop finishes naturally
         cursor.execute("UPDATE scans SET status = 'completed' WHERE id = ?", (scan_id,))
         db.commit()
         print("Scan completed successfully.")
@@ -200,7 +194,7 @@ def run_scanner(scan_id, spacing):
         db.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ERT Hardware Emulator")
+    parser = argparse.ArgumentParser(description="ERT Hardware Profiler")
     parser.add_argument("--scan_id", type=int, required=True, help="ID of the scan to execute")
     parser.add_argument("--spacing", type=float, required=True, help="Electrode spacing in meters")
     
