@@ -7,11 +7,11 @@ use App\Models\Project;
 use App\Models\Scan;
 use App\Models\MatrixPoint;
 use App\Models\SystemState;
-use App\Console\Jobs\RunGroundScan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Symfony\Component\Process\Process as SymfonyProcess;
 
 class ScanController extends Controller
 {
@@ -146,12 +146,36 @@ class ScanController extends Controller
             'status' => 'pending',
         ]);
 
-        // 3. Run the scan job immediately so the dashboard sees the scan as running
-        // even when the queue worker is not available.
+        // 3. Launch the scanner directly in the background so the dashboard sees the
+        // scan as running immediately, without depending on the queue worker.
         try {
-            RunGroundScan::dispatchSync($scan->id, (float)$validated['electrode_spacing_meters']);
+            $projectRoot = '/var/www/manech_ert';
+            $pythonPath = $projectRoot . '/venv/bin/python3';
+            $scannerScript = $projectRoot . '/emulator/matrix_scanner.py';
+            $logPath = storage_path('logs/scan_' . $scan->id . '.log');
+
+            $shellCommand = sprintf(
+                'cd %s && source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f > %s 2>&1',
+                escapeshellarg($projectRoot),
+                escapeshellarg($projectRoot),
+                escapeshellarg($pythonPath),
+                escapeshellarg($scannerScript),
+                $scan->id,
+                (float) $validated['electrode_spacing_meters'],
+                escapeshellarg($logPath)
+            );
+
+            $process = new SymfonyProcess(['/bin/bash', '-lc', $shellCommand], $projectRoot);
+            $process->setEnv([
+                'PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+                'HOME' => getenv('HOME') ?: $projectRoot,
+            ]);
+            $process->setTimeout(1);
+            $process->start();
+
+            $scan->update(['status' => 'running']);
         } catch (\Throwable $e) {
-            Log::error('Failed to start scan synchronously', [
+            Log::error('Failed to launch scan process', [
                 'scan_id' => $scan->id,
                 'error' => $e->getMessage(),
             ]);
