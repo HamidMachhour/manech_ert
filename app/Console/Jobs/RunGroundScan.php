@@ -42,22 +42,18 @@ class RunGroundScan implements ShouldQueue
             @chmod($shmPath, 0666);
         }
 
-        // Launch the Python process and poll the abort signal while it's running
-        $command = [
-            $pythonPath,
-            $scannerScript,
-            '--scan_id=' . $this->scanId,
-            '--spacing=' . $this->spacing,
-        ];
+        // Launch the Python process through a shell that activates the virtualenv first,
+        // matching the manual command path used on the Orange Pi.
+        $shellCommand = sprintf(
+            'source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f',
+            escapeshellarg($projectRoot),
+            escapeshellarg($pythonPath),
+            escapeshellarg($scannerScript),
+            $this->scanId,
+            $this->spacing
+        );
 
-        // When the queue worker runs under a different service user, it may not have
-        // direct hardware access. Try sudo as a fallback so the script runs with the
-        // same privileges as the manual shell session when the service is configured for it.
-        if (function_exists('posix_getuid') && posix_getuid() !== 0 && is_executable('/usr/bin/sudo')) {
-            $command = array_merge(['sudo', '-n'], $command);
-        }
-
-        $process = new SymfonyProcess($command, $projectRoot);
+        $process = new SymfonyProcess(['/bin/bash', '-lc', $shellCommand], $projectRoot);
         $process->setEnv([
             'PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             'HOME' => getenv('HOME') ?: $projectRoot,
