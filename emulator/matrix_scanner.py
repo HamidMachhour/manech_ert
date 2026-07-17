@@ -109,11 +109,15 @@ def run_scanner(scan_id, spacing):
                 if stake_b > 16:
                     break
 
-                # Activate the injection quad for this electrode set
+                # Activate the injection and measurement relay states for this electrode set.
+                # The controller resets the relay state on each call, so we issue the
+                # injection step first and the measurement step immediately after.
                 if matrix_controller is not None:
                     matrix_controller.activate_injection_quad(stake_a, stake_b)
+                    matrix_controller.activate_measurement_quad(stake_m, stake_n)
                 else:
                     print(f"[SIM] Activating injection relays for electrodes {stake_a} and {stake_b}")
+                    print(f"[SIM] Activating measurement relays for electrodes {stake_m} and {stake_n}")
 
                 # --- CRITICAL FAIL-SAFE CHECK ---
                 if check_kill_signal():
