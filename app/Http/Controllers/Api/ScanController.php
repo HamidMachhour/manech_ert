@@ -155,7 +155,7 @@ class ScanController extends Controller
             $logPath = storage_path('logs/scan_' . $scan->id . '.log');
 
             $shellCommand = sprintf(
-                'sudo -u orangepi bash -lc "cd %s && source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f > %s 2>&1"',
+                'cd %s && source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f > %s 2>&1',
                 escapeshellarg($projectRoot),
                 escapeshellarg($projectRoot),
                 escapeshellarg($pythonPath),
@@ -167,8 +167,10 @@ class ScanController extends Controller
 
             $process = new SymfonyProcess(['/bin/bash', '-lc', $shellCommand], $projectRoot);
             $process->setEnv([
-                'PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-                'HOME' => getenv('HOME') ?: $projectRoot,
+                'PATH' => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:' . $projectRoot . '/venv/bin',
+                'HOME' => '/var/www/manech_ert',
+                'USER' => 'www-data',
+                'SHELL' => '/bin/bash',
             ]);
             $process->setTimeout(1);
             $process->start();
