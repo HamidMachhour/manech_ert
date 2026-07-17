@@ -168,8 +168,8 @@ class ScanController extends Controller
             $process = new SymfonyProcess(['/bin/bash', '-lc', $shellCommand], $projectRoot);
             $process->setEnv([
                 'PATH' => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:' . $projectRoot . '/venv/bin',
-                'HOME' => '/var/www/manech_ert',
-                'USER' => 'www-data',
+                'HOME' => '/home/orangepi',
+                'USER' => 'orangepi',
                 'SHELL' => '/bin/bash',
             ]);
             $process->setTimeout(1);
