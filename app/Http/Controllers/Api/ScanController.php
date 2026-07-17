@@ -11,6 +11,7 @@ use App\Console\Jobs\RunGroundScan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class ScanController extends Controller
 {
@@ -145,8 +146,22 @@ class ScanController extends Controller
             'status' => 'pending',
         ]);
 
-        // 3. Dispatch the asynchronous job
-        RunGroundScan::dispatch($scan->id, (float)$validated['electrode_spacing_meters']);
+        // 3. Run the scan job immediately so the dashboard sees the scan as running
+        // even when the queue worker is not available.
+        try {
+            RunGroundScan::dispatchSync($scan->id, (float)$validated['electrode_spacing_meters']);
+        } catch (\Throwable $e) {
+            Log::error('Failed to start scan synchronously', [
+                'scan_id' => $scan->id,
+                'error' => $e->getMessage(),
+            ]);
+            $scan->update(['status' => 'failed']);
+
+            return response()->json([
+                'message' => 'Scan start failed',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
 
         // Also ensure the shared-memory abort flag is cleared for the new scan
         $shmPath = '/dev/shm/scan_aborted';
