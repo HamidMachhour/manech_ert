@@ -4,15 +4,15 @@ import smbus2
 import spidev
 
 try:
-    import Adafruit_ADS1x15.ADS1115 as ADS1115
+    import Adafruit_ADS1x15 as Adafruit_ADS1x15
+    ADS1115_MODULE = Adafruit_ADS1x15.ADS1115
 except Exception:
-    ADS1115 = None
+    ADS1115_MODULE = None
 
 class ErtMatrixController:
     """
     Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander
     and synchronizes a 16-LED WS2812B strip using raw spidev native byte-arrays.
-    Relay activity is driven directly by the bitmask so LED-on corresponds to relay-on.
     """
     
     # MCP23017 Register Addresses
@@ -32,6 +32,8 @@ class ErtMatrixController:
         
         # 1. Initialize SMBus2 for MCP23017
         last_i2c_error = None
+        validated_bus_id = i2c_bus_id
+
         for bus_id in [i2c_bus_id, 1, 0]:
             try:
                 self.bus = smbus2.SMBus(bus_id)
@@ -41,6 +43,7 @@ class ErtMatrixController:
                 self.bus.write_byte_data(self.mcp_address, self.IODIRB, 0x00)
                 
                 self.hardware_present = True
+                validated_bus_id = bus_id
                 print(f" -> [OK] Physical MCP23017 detected and initialized on I2C bus {bus_id}.")
                 break
             except Exception as exc:
@@ -51,11 +54,11 @@ class ErtMatrixController:
             print(f" -> [SIMULATION] No physical I2C device found. Running in offline test mode. Last error: {last_i2c_error}")
         else:
             try:
-                if ADS1115 is not None:
-                    self.adc = ADS1115.ADS1115(address=0x48, busnum=i2c_bus_id)
-                    self.adc.gain = 1
+                if ADS1115_MODULE is not None:
+                    # Utilise le bus_id validé dynamiquement lors de la boucle précédente
+                    self.adc = ADS1115_MODULE(address=0x48, busnum=validated_bus_id)
                     self.adc_present = True
-                    print(" -> [OK] ADS1115 ADC detected and initialized on the shared I2C bus.")
+                    print(f" -> [OK] ADS1115 ADC detected and initialized on the shared I2C bus {validated_bus_id}.")
                 else:
                     print(" -> [WARN] ADS1115 Python library is not available; ADC readings will be simulated.")
             except Exception as exc:
@@ -76,7 +79,7 @@ class ErtMatrixController:
         # 3. Create a plain Python list for tracking colors
         self.led_list = [[0, 0, 0] for _ in range(self.led_count)]
         
-        # 4. Initial system flush (Forcera l'extinction des relais et des LEDs au démarrage)
+        # 4. Initial system flush
         self.clear_all()
 
     def _send_to_led_strip(self):
@@ -142,16 +145,14 @@ class ErtMatrixController:
             return 0
 
         if elec % 2 == 1:
-            # Odd electrode -> GPIOA, bit index 0..7 for electrodes 1,3,...,15
             index = (elec - 1) // 2
             return 1 << index
         else:
-            # Even electrode -> GPIOB, bit index 8..15 for electrodes 2,4,...,16
             index = (elec // 2) - 1
             return 1 << (8 + index)
 
     def activate_injection_quad(self, elec_A, elec_B):
-        """Sets LEDs (A, B) to RED, closes injection relays (Active-Low)."""
+        """Sets LEDs (A, B) to RED, closes injection relays."""
         print(f"\n[Command] Activating Injection Quad on Electrodes A={elec_A}, B={elec_B}")
         self.clear_all()  
         time.sleep(0.01)  
@@ -160,12 +161,11 @@ class ErtMatrixController:
         self.led_list[elec_B - 1] = [255, 0, 0]  
         self._send_to_led_strip()
         
-        # Build combined 16-bit mask: odds->GPIOA, evens->GPIOB
         combined = self._electrode_bitmask(elec_A) | self._electrode_bitmask(elec_B)
         self._write_to_relays(combined)
 
     def activate_measurement_quad(self, elec_M, elec_N):
-        """Sets LEDs (M, N) to GREEN, closes potential reading relays (Active-Low)."""
+        """Sets LEDs (M, N) to GREEN, closes potential reading relays."""
         print(f"\n[Command] Activating Measurement Quad on Electrodes M={elec_M}, N={elec_N}")
         self.clear_all()  
         time.sleep(0.01)
@@ -174,7 +174,6 @@ class ErtMatrixController:
         self.led_list[elec_N - 1] = [0, 255, 0]  
         self._send_to_led_strip()
         
-        # Build combined 16-bit mask: odds->GPIOA, evens->GPIOB
         combined = self._electrode_bitmask(elec_M) | self._electrode_bitmask(elec_N)
         self._write_to_relays(combined)
 
@@ -184,20 +183,18 @@ class ErtMatrixController:
             return None, None
 
         try:
-            # Channel 0 / 1: voltage measurement pair
-            # Channel 2 / 3: current shunt measurement pair
-            # The schematic uses differential channels A0/A1 and A2/A3.
-            # The ADS1115 library returns values in volts for the selected gain.
+            # Gain=1 donne une plage de +/-4.096V. Le pas LSB est de 0.125 mV (0.000125V).
+            # Index de l'ancienne lib Adafruit pour les mesures différentielles :
+            # 0 = Différentiel entre A0 (positif) et A1 (négatif)
+            # 3 = Différentiel entre A2 (positif) et A3 (négatif)
             voltage_raw = self.adc.read_adc_difference(0, gain=1)
-            current_raw = self.adc.read_adc_difference(2, gain=1)
+            current_raw = self.adc.read_adc_difference(3, gain=1)
 
-            # Convert ADC counts to volts; gain=1 gives +/-4.096V full range.
-            # With 16-bit ADC and PGA gain 1, one count is ~125 uV.
+            # Conversion du signal brut en Volts physiques
             voltage_volts = voltage_raw * 0.000125
             current_volts = current_raw * 0.000125
 
-            # Current is derived from the shunt voltage over the known resistance.
-            # The schematic suggests a 10 ohm shunt resistor.
+            # Calcul de l'intensité passant par le shunt de 10 Ohms (U = R * I)
             shunt_resistance_ohms = 10.0
             current_ma = (current_volts / shunt_resistance_ohms) * 1000.0
 
@@ -215,12 +212,18 @@ class ErtMatrixController:
         print("\n -> [INFO] ERT Controller hardware instances safely released.")
 
 if __name__ == "__main__":
-    print("Testing Ultra-Lightweight Inline SPI Driver...")
+    print("Testing Ultra-Lightweight Inline SPI Driver with ADS1115 Interface...")
     matrix = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
     try:
         matrix.activate_injection_quad(1, 4)
-        time.sleep(1.5)
+        time.sleep(1.0)
+        
+        # Test de lecture des capteurs
+        v, i = matrix.read_adc()
+        if v is not None:
+            print(f" -> Mesures lues : Tension = {v:.4f} V, Courant = {i:.2f} mA")
+            
         matrix.activate_measurement_quad(2, 3)
-        time.sleep(1.5)
+        time.sleep(1.0)
     finally:
         matrix.close()
