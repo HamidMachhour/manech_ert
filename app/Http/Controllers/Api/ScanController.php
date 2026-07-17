@@ -155,7 +155,7 @@ class ScanController extends Controller
             $logPath = storage_path('logs/scan_' . $scan->id . '.log');
 
             $shellCommand = sprintf(
-                'cd %s && source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f > %s 2>&1',
+                'sudo -u orangepi bash -lc "cd %s && source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f > %s 2>&1"',
                 escapeshellarg($projectRoot),
                 escapeshellarg($projectRoot),
                 escapeshellarg($pythonPath),
