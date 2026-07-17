@@ -42,11 +42,10 @@ class RunGroundScan implements ShouldQueue
             @chmod($shmPath, 0666);
         }
 
-        // Launch the Python process through a shell that activates the virtualenv first,
-        // matching the manual command path used on the Orange Pi.
+        // Launch the Python process as the orangepi user so it uses the same hardware
+        // permissions as the working CLI run.
         $shellCommand = sprintf(
-            'source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f',
-            escapeshellarg($projectRoot),
+            '/usr/bin/sudo -n -u orangepi -H %s %s --scan_id=%d --spacing=%.10f',
             escapeshellarg($pythonPath),
             escapeshellarg($scannerScript),
             $this->scanId,

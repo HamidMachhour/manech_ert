@@ -155,9 +155,7 @@ class ScanController extends Controller
             $logPath = storage_path('logs/scan_' . $scan->id . '.log');
 
             $shellCommand = sprintf(
-                'cd %s && source %s/venv/bin/activate && %s %s --scan_id=%d --spacing=%.10f > %s 2>&1',
-                escapeshellarg($projectRoot),
-                escapeshellarg($projectRoot),
+                'set -o pipefail; %s %s --scan_id=%d --spacing=%.10f 2>&1 | tee %s',
                 escapeshellarg($pythonPath),
                 escapeshellarg($scannerScript),
                 $scan->id,
