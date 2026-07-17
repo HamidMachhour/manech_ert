@@ -7,11 +7,11 @@ use App\Models\Project;
 use App\Models\Scan;
 use App\Models\MatrixPoint;
 use App\Models\SystemState;
+use App\Console\Jobs\RunGroundScan;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\Process\Process as SymfonyProcess;
 
 class ScanController extends Controller
 {
@@ -146,43 +146,18 @@ class ScanController extends Controller
             'status' => 'pending',
         ]);
 
-        // 3. Launch the scanner directly in the background so the dashboard sees the
-        // scan as running immediately, without depending on the queue worker.
+        // 3. Dispatch the queued scan job now that www-data has I2C access.
         try {
-            $projectRoot = '/var/www/manech_ert';
-            $pythonPath = $projectRoot . '/venv/bin/python3';
-            $scannerScript = $projectRoot . '/emulator/matrix_scanner.py';
-            $logPath = storage_path('logs/scan_' . $scan->id . '.log');
-
-            $shellCommand = sprintf(
-                'set -o pipefail; %s %s --scan_id=%d --spacing=%.10f 2>&1 | tee %s',
-                escapeshellarg($pythonPath),
-                escapeshellarg($scannerScript),
-                $scan->id,
-                (float) $validated['electrode_spacing_meters'],
-                escapeshellarg($logPath)
-            );
-
-            $process = new SymfonyProcess(['/bin/bash', '-lc', $shellCommand], $projectRoot);
-            $process->setEnv([
-                'PATH' => '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:' . $projectRoot . '/venv/bin',
-                'HOME' => '/home/orangepi',
-                'USER' => 'orangepi',
-                'SHELL' => '/bin/bash',
-            ]);
-            $process->setTimeout(1);
-            $process->start();
-
-            $scan->update(['status' => 'running']);
+            RunGroundScan::dispatch($scan->id, (float) $validated['electrode_spacing_meters']);
         } catch (\Throwable $e) {
-            Log::error('Failed to launch scan process', [
+            Log::error('Failed to dispatch RunGroundScan job', [
                 'scan_id' => $scan->id,
                 'error' => $e->getMessage(),
             ]);
             $scan->update(['status' => 'failed']);
 
             return response()->json([
-                'message' => 'Scan start failed',
+                'message' => 'Scan dispatch failed',
                 'error' => $e->getMessage(),
             ], 500);
         }

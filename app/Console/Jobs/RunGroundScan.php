@@ -42,17 +42,14 @@ class RunGroundScan implements ShouldQueue
             @chmod($shmPath, 0666);
         }
 
-        // Launch the Python process as the orangepi user so it uses the same hardware
-        // permissions as the working CLI run.
-        $shellCommand = sprintf(
-            '/usr/bin/sudo -n -u orangepi -H %s %s --scan_id=%d --spacing=%.10f',
-            escapeshellarg($pythonPath),
-            escapeshellarg($scannerScript),
-            $this->scanId,
-            $this->spacing
-        );
-
-        $process = new SymfonyProcess(['/bin/bash', '-lc', $shellCommand], $projectRoot);
+        // Launch the Python process directly. www-data now has i2c access,
+        // so sudo is no longer needed and the execution path is simpler.
+        $process = new SymfonyProcess([
+            $pythonPath,
+            $scannerScript,
+            '--scan_id=' . $this->scanId,
+            '--spacing=' . $this->spacing,
+        ], $projectRoot);
         $process->setEnv([
             'PATH' => getenv('PATH') ?: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
             'HOME' => getenv('HOME') ?: $projectRoot,
