@@ -5,8 +5,9 @@ import spidev
 
 class ErtMatrixController:
     """
-    Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander (Active-Low Relays)
+    Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander
     and synchronizes a 16-LED WS2812B strip using raw spidev native byte-arrays.
+    Relay activity is driven directly by the bitmask so LED-on corresponds to relay-on.
     """
     
     # MCP23017 Register Addresses
@@ -15,7 +16,7 @@ class ErtMatrixController:
     GPIOA  = 0x12   
     GPIOB  = 0x13   
 
-    def __init__(self, i2c_bus_id=1, mcp_address=0x20, led_count=16):
+    def __init__(self, i2c_bus_id=0, mcp_address=0x20, led_count=16):
         self.mcp_address = mcp_address
         self.led_count = led_count
         self.hardware_present = False
@@ -79,36 +80,27 @@ class ErtMatrixController:
         self._send_to_led_strip()
 
     def clear_all(self):
-        """Safely isolates both the relays (Set HIGH for Active-Low) and clears the LED strip."""
-        # Drop the lights to black
+        """Safely deactivates all relays and clears the LED strip."""
         self.clear_strip()
 
-        # Isolate physical hardware relay lines (Active-Low: 0xFF / 11111111 = Relays Off)
         if self.hardware_present:
             try:
-                self.bus.write_byte_data(self.mcp_address, self.GPIOA, 0xFF)
-                self.bus.write_byte_data(self.mcp_address, self.GPIOB, 0xFF)
+                self.bus.write_byte_data(self.mcp_address, self.GPIOA, 0x00)
+                self.bus.write_byte_data(self.mcp_address, self.GPIOB, 0x00)
             except OSError as e:
                 print(f" -> Hardware connection lost during clear operation: {e}")
         else:
-            print("    [SIM HARDWARE] Matrix Open Isolation: All 16 relay pins forced HIGH (0xFF - Off).")
+            print("    [SIM HARDWARE] Matrix Open Isolation: All 16 relay pins forced LOW (0x00).")
 
     def _write_to_relays(self, combined_16bit_word):
-        """
-        Writes a 16-bit word to the GPIO registers. 
-        Applies bitwise NOT (~) because the relay board is Active-Low.
-        """
-        # Inversion logique pour carte relais active à l'état bas : 
-        # Un bit à 1 dans le "combined_16bit_word" doit envoyer un 0V (0) physique au relais.
-        active_low_word = (~combined_16bit_word) & 0xFFFF
-        
+        """Writes a 16-bit word to the MCP23017 GPIO registers directly."""
         if not self.hardware_present:
-            print(f"    [SIM HARDWARE] Relay Register Word Sent (Active-Low inverted): {active_low_word:016b}")
+            print(f"    [SIM HARDWARE] Relay Register Word Sent: {combined_16bit_word:016b}")
             return
-            
-        byte_A = active_low_word & 0xFF        
-        byte_B = (active_low_word >> 8) & 0xFF 
-        
+
+        byte_A = combined_16bit_word & 0xFF
+        byte_B = (combined_16bit_word >> 8) & 0xFF
+
         try:
             self.bus.write_byte_data(self.mcp_address, self.GPIOA, byte_A)
             self.bus.write_byte_data(self.mcp_address, self.GPIOB, byte_B)
@@ -170,9 +162,8 @@ class ErtMatrixController:
         print("\n -> [INFO] ERT Controller hardware instances safely released.")
 
 if __name__ == "__main__":
-    print("Testing Ultra-Lightweight Inline SPI Driver with Active-Low Relays...")
-    # Changé l'I2C bus ID par défaut à 1 (souvent utilisé sur cartes Armbian/Pi)
-    matrix = ErtMatrixController(i2c_bus_id=1, mcp_address=0x20)
+    print("Testing Ultra-Lightweight Inline SPI Driver...")
+    matrix = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
     try:
         matrix.activate_injection_quad(1, 4)
         time.sleep(1.5)
