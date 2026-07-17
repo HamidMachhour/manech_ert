@@ -3,6 +3,11 @@ import time
 import smbus2
 import spidev
 
+try:
+    import Adafruit_ADS1x15.ADS1115 as ADS1115
+except Exception:
+    ADS1115 = None
+
 class ErtMatrixController:
     """
     Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander
@@ -22,6 +27,8 @@ class ErtMatrixController:
         self.hardware_present = False
         self.spi_present = False
         self.bus = None
+        self.adc = None
+        self.adc_present = False
         
         # 1. Initialize SMBus2 for MCP23017
         last_i2c_error = None
@@ -42,6 +49,18 @@ class ErtMatrixController:
 
         if not self.hardware_present:
             print(f" -> [SIMULATION] No physical I2C device found. Running in offline test mode. Last error: {last_i2c_error}")
+        else:
+            try:
+                if ADS1115 is not None:
+                    self.adc = ADS1115.ADS1115(address=0x48, busnum=i2c_bus_id)
+                    self.adc.gain = 1
+                    self.adc_present = True
+                    print(" -> [OK] ADS1115 ADC detected and initialized on the shared I2C bus.")
+                else:
+                    print(" -> [WARN] ADS1115 Python library is not available; ADC readings will be simulated.")
+            except Exception as exc:
+                self.adc_present = False
+                print(f" -> [WARN] ADS1115 initialization failed: {exc}")
         
         # 2. Initialize Hardware SPI via spidev for WS2812B
         try:
@@ -158,6 +177,34 @@ class ErtMatrixController:
         # Build combined 16-bit mask: odds->GPIOA, evens->GPIOB
         combined = self._electrode_bitmask(elec_M) | self._electrode_bitmask(elec_N)
         self._write_to_relays(combined)
+
+    def read_adc(self):
+        """Read the ADS1115 differential voltage channels and return current/voltage values."""
+        if not self.adc_present or self.adc is None:
+            return None, None
+
+        try:
+            # Channel 0 / 1: voltage measurement pair
+            # Channel 2 / 3: current shunt measurement pair
+            # The schematic uses differential channels A0/A1 and A2/A3.
+            # The ADS1115 library returns values in volts for the selected gain.
+            voltage_raw = self.adc.read_adc_difference(0, gain=1)
+            current_raw = self.adc.read_adc_difference(2, gain=1)
+
+            # Convert ADC counts to volts; gain=1 gives +/-4.096V full range.
+            # With 16-bit ADC and PGA gain 1, one count is ~125 uV.
+            voltage_volts = voltage_raw * 0.000125
+            current_volts = current_raw * 0.000125
+
+            # Current is derived from the shunt voltage over the known resistance.
+            # The schematic suggests a 10 ohm shunt resistor.
+            shunt_resistance_ohms = 10.0
+            current_ma = (current_volts / shunt_resistance_ohms) * 1000.0
+
+            return voltage_volts, current_ma
+        except Exception as exc:
+            print(f" -> [WARN] ADS1115 read failed: {exc}")
+            return None, None
 
     def close(self):
         self.clear_all()

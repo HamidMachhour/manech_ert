@@ -138,18 +138,31 @@ def run_scanner(scan_id, spacing):
                 # Simulate hardware relay latency bounce
                 time.sleep(0.1)
 
-                # Convert hardware electrode pin numbers to true spatial metrics (meters)
-                xa = stake_a * spacing
-                xb = stake_b * spacing
-                xm = stake_m * spacing
-                xn = stake_n * spacing
-                
-                # Pass coordinates to your physics simulator engine
-                rho = simulate_earth_physics(xa, xb, xm, xn)
+                # Read real ADC values from the ADS1115 if available.
+                voltage_volts = None
+                current_ma = None
+                if matrix_controller is not None:
+                    voltage_volts, current_ma = matrix_controller.read_adc()
 
-                # Derive consistent V and I values
-                current = 1.0 + random.uniform(-0.005, 0.005)
-                voltage = rho * current * 0.1 
+                if voltage_volts is None or current_ma is None:
+                    # Fall back to the previous pseudo-physics model when ADC support is unavailable.
+                    xa = stake_a * spacing
+                    xb = stake_b * spacing
+                    xm = stake_m * spacing
+                    xn = stake_n * spacing
+                    rho = simulate_earth_physics(xa, xb, xm, xn)
+                    current = 1.0 + random.uniform(-0.005, 0.005)
+                    voltage = rho * current * 0.1
+                else:
+                    # Convert the measured voltage and current into apparent resistivity.
+                    # Use the Wenner geometry: rho = 2 * pi * spacing * V / I
+                    # when the measured current is non-zero.
+                    if abs(current_ma) > 1e-9:
+                        rho = (2 * 3.141592653589793 * spacing * voltage_volts) / (current_ma / 1000.0)
+                    else:
+                        rho = 0.0
+                    current = current_ma / 1000.0
+                    voltage = voltage_volts
 
                 # Append to active batch
                 batch_data.append((scan_id, stake_a, stake_b, stake_m, stake_n, voltage, current, rho))
