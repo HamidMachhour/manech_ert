@@ -147,16 +147,26 @@ class ErtMatrixController:
         return 0
 
     def _electrode_bitmask(self, pin_number: int) -> int:
-        """Mappe un numéro de broche 1-16 vers le bit correspondant du MCP23017."""
-        if pin_number < 1 or pin_number > 16:
-            return 0
-        if pin_number % 2 == 1:
-            index = (pin_number - 1) // 2
-            return 1 << index
-        else:
-            index = (pin_number // 2) - 1
-            return 1 << (8 + index)
+            """
+            Mappe un numéro de relais physique (1 à 16) vers le bit exact du MCP23017.
+            Corrige l'inversion et l'entrelacement des broches paires (Port B) et impaires (Port A).
+            """
+            if pin_number < 1 or pin_number > 16:
+                return 0
 
+            # Mappage matériel direct (Ajusté selon votre comportement observé)
+            # Relais 1 à 8 (Impairs) vont sur le Port A (bits 0 à 7)
+            # Relais 9 à 16 (Pairs) vont sur le Port B (bits 8 à 15)
+            
+            if pin_number <= 8:
+                # Exemple : Relais 1 -> bit 0, Relais 2 -> bit 1 ... Relais 8 -> bit 7
+                bit_position = pin_number - 1
+                return 1 << bit_position
+            else:
+                # Exemple : Relais 9 -> bit 8, Relais 10 -> bit 9 ... Relais 16 -> bit 15
+                bit_position = (pin_number - 9) + 8
+                return 1 << bit_position
+            
     def activate_quad(self, idx_A, idx_M, idx_N, idx_B):
         """
         Active simultanément les 4 relais nécessaires à la mesure sans aucun risque de court-circuit
