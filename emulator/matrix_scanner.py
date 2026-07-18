@@ -5,6 +5,7 @@ import argparse
 import time
 import random
 import sys
+import math
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(SCRIPT_DIR)
@@ -15,64 +16,73 @@ except ImportError:
     ErtMatrixController = None
 
 def get_db_connection():
-    """
-    Establishes a connection to an SQLite database file.
-    """
     db_path = os.path.normpath(os.path.join(SCRIPT_DIR, '..', 'database', 'database.sqlite'))
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
     try:
         connection = sqlite3.connect(db_path, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
     except sqlite3.Error as err:
-        print(f"Database Connection Error: {err}")
+        print(f"Erreur de connexion à la base de données : {err}")
         sys.exit(1)
  
 def check_kill_signal():
-    """
-    Checks the shared memory abort flag file.
-    """
     shm_path = '/dev/shm/scan_aborted'
     if not os.path.exists(shm_path):
         return False
-
     try:
         with open(shm_path, 'r') as f:
-            contents = f.read().strip()
-            return contents == '1'
+            return f.read().strip() == '1'
     except Exception:
         return False
 
-def simulate_earth_physics(xa, xb, xm, xn):
+def calculate_k_factor(i, l, k, j, spacing_a):
     """
-    Simulates subsurface resistivity based on pseudo-location and depth.
-    Used ONLY when physical hardware is entirely absent.
+    Calcule la constante géométrique K pour l'alignement alterné :
+    A0-M0-N0-B0 - A1-M1-N1-B1 ...
+    Positions absolues en unités de distance : A=4*idx, M=4*idx+1, N=4*idx+2, B=4*idx+3
     """
-    center_x = (xa + xb + xm + xn) / 4.0
-    pseudo_depth = abs(xb - xa) * 0.195  
-    
+    pos_A = 4 * i
+    pos_M = 4 * l + 1
+    pos_N = 4 * k + 2
+    pos_B = 4 * j + 3
+
+    # Distances réelles en mètres
+    r_AM = abs(pos_M - pos_A) * spacing_a
+    r_BM = abs(pos_M - pos_B) * spacing_a
+    r_AN = abs(pos_N - pos_A) * spacing_a
+    r_BN = abs(pos_N - pos_B) * spacing_a
+
+    try:
+        terme_geometrique = (1.0 / r_AM) - (1.0 / r_BM) - (1.0 / r_AN) + (1.0 / r_BN)
+        if abs(terme_geometrique) < 1e-9:
+            return 0.0
+        return (2 * math.pi) / abs(terme_geometrique)
+    except ZeroDivisionError:
+        return 0.0
+
+def simulate_earth_physics(i, l, k, j, spacing_a):
+    """Simulation de la résistivité pour les tests en mode déconnecté."""
+    center_pos = (i + l + k + j) / 4.0
+    pseudo_depth = abs(j - i) * 4 * spacing_a * 0.2
     base_resistivity = 150.0 
     
-    if pseudo_depth > 2.0:
-        return 15.0 + random.gauss(0, 0.5) 
-        
-    if 5.0 < center_x < 10.0 and 0.5 < pseudo_depth < 1.5:
-        return 8.0 + random.gauss(0, 0.2)
+    if pseudo_depth > 0.15:
+        return 25.0 + random.gauss(0, 0.5) 
+    if 1.0 < center_pos < 2.5:
+        return 12.0 + random.gauss(0, 0.2) # Zone humide simulée au centre
         
     return base_resistivity + random.gauss(0, 2.0)
-
 
 def run_scanner(scan_id, spacing):
     db = get_db_connection()
     cursor = db.cursor()
 
-    print(f"Starting scan {scan_id} with spacing {spacing}m...")
+    print(f"Démarrage du scan combinatoire {scan_id} avec un pas d'espacement de {spacing}m...")
 
-    # Verify scan exists to avoid Foreign Key errors
     cursor.execute("SELECT id FROM scans WHERE id = ?", (scan_id,))
     if not cursor.fetchone():
-        print(f"Error: Scan ID {scan_id} not found in database. Exiting.")
+        print(f"Erreur : Scan ID {scan_id} introuvable en base. Sortie.")
         cursor.close()
         db.close()
         return
@@ -86,92 +96,85 @@ def run_scanner(scan_id, spacing):
             try:
                 matrix_controller = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
             except Exception as e:
-                print(f"Warning: Failed to initialize ERT matrix controller: {e}")
+                print(f"Avertissement : Erreur d'initialisation matérielle : {e}")
                 matrix_controller = None
 
-        # Nested loop running the Wenner profile sequence
-        for a in range(1, 6): # Spacing multipliers: 1x, 2x, 3x, 4x, 5x spacing
-            for i in range(1, 17):
-                stake_a = i
-                stake_m = i + a
-                stake_n = i + 2 * a
-                stake_b = i + 3 * a
-                
-                if stake_b > 16:
-                    break
+        # Boucles d'exploration combinatoire basées sur vos indices de dipôles (0 à 3)
+        # Condition géométrique stricte sur la ligne : i <= l <= k <= j
+        for i in range(4):
+            for l in range(4):
+                for k in range(4):
+                    for j in range(4):
+                        if not (i <= l <= k <= j):
+                            continue # Ignore les géométries inversées ou impossibles
 
-                # --- SÉQUENCEMENT PHYSIQUE DE L'INJECTION ET DE LA MESURE ---
-                if matrix_controller is not None:
-                    # 1. Activation de la ligne de puissance (A, B) et attente de stabilisation de la source
-                    matrix_controller.activate_injection_quad(stake_a, stake_b)
-                    time.sleep(0.1) 
-                    
-                    # 2. Ouverture des lignes de lecture du potentiel (M, N) et stabilisation des relais
-                    matrix_controller.activate_measurement_quad(stake_m, stake_n)
-                    time.sleep(0.1) 
-                else:
-                    print(f"[SIM] Activating injection relays for electrodes {stake_a} and {stake_b}")
-                    print(f"[SIM] Activating measurement relays for electrodes {stake_m} and {stake_n}")
-                    time.sleep(0.2)
+                        # Calcul automatique du facteur K pour ce quadruplet
+                        k_factor = calculate_k_factor(i, l, k, j, spacing)
+                        if k_factor == 0.0:
+                            continue
 
-                # --- CRITICAL FAIL-SAFE CHECK ---
-                if check_kill_signal():
-                    print("!!! EMERGENCY ABORT SIGNAL DETECTED !!!")
-                    if batch_data:
-                        cursor.executemany(
-                            """
-                            INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            batch_data
-                        )
-                        db.commit()
-                    cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = ?", (scan_id,))
-                    db.commit()
-                    return
+                        # Mappage des indices pour l'enregistrement en BDD (conserve la lisibilité)
+                        stake_a = 4 * i + 1
+                        stake_m = 4 * l + 2
+                        stake_n = 4 * k + 3
+                        stake_b = 4 * j + 4
 
-                # --- LECTURE ET TRAITEMENT DES DONNÉES ---
-                if matrix_controller is not None:
-                    # Lecture directe depuis l'ADS1115
-                    voltage_volts, current_ma = matrix_controller.read_adc()
-                    
-                    # Remplacement des valeurs None par 0.0 en cas d'erreur de communication I2C ponctuelle
-                    if voltage_volts is None: voltage_volts = 0.0
-                    if current_ma is None: current_ma = 0.0
+                        # --- COMMUTATION DES RELAIS ---
+                        if matrix_controller is not None:
+                            # Activation globale des 4 lignes de bus
+                            matrix_controller.activate_quad(i, l, k, j)
+                            time.sleep(0.2) # Temps global de stabilisation de la source et des lignes
+                        else:
+                            print(f"[SIM] Activation combinatoire complète : A{i} M{l} N{k} B{j}")
+                            time.sleep(0.1)
 
-                    voltage = voltage_volts
-                    current = current_ma / 1000.0  # Conversion mA en Ampères pour la loi d'Ohm
+                        # --- SIGNAL D'ARRÊT D'URGENCE ---
+                        if check_kill_signal():
+                            print("!!! ARRET D'URGENCE DEMANDE PAR L'INTERFACE !!!")
+                            if batch_data:
+                                cursor.executemany("""
+                                    INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """, batch_data)
+                                db.commit()
+                            cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = ?", (scan_id,))
+                            db.commit()
+                            return
 
-                    # Formule Wenner : rho = 2 * pi * a * V / I
-                    # Seuil minimal de sécurité pour éviter la division par zéro (bruit de fond à vide)
-                    if abs(current) > 1e-6:
-                        rho = (2 * 3.141592653589793 * spacing * voltage) / current
-                    else:
-                        rho = 0.0
-                else:
-                    # MODE HORS-LIGNE COMPLET : Utilisation de la simulation physique
-                    xa = stake_a * spacing
-                    xb = stake_b * spacing
-                    xm = stake_m * spacing
-                    xn = stake_n * spacing
-                    
-                    rho = simulate_earth_physics(xa, xb, xm, xn)
-                    current = (1.0 + random.uniform(-0.005, 0.005)) * 0.1  # ~100mA simulés
-                    voltage = (rho * current) / (2 * 3.141592653589793 * spacing)
+                        # --- ACQUISITION ADC ---
+                        if matrix_controller is not None:
+                            voltage_volts, current_amperes = matrix_controller.read_adc()
+                            
+                            if voltage_volts is None: voltage_volts = 0.0
+                            if current_amperes is None: current_amperes = 0.0
 
-                # Ajout de la ligne au lot en cours
-                batch_data.append((scan_id, stake_a, stake_b, stake_m, stake_n, voltage, current, rho))
-                
-                if len(batch_data) >= BATCH_SIZE:
-                    cursor.executemany("""
-                        INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, batch_data)
-                    db.commit()
-                    batch_data = []
-                    print(f"Wenner Bound Committed: A:{stake_a} M:{stake_m} N:{stake_n} B:{stake_b} | Rho: {rho:.2f} Ohm.m (I: {current*1000:.1f} mA, V: {voltage:.4f} V)")
+                            voltage = voltage_volts
+                            current = current_amperes
 
-        # Validation finale des points restants
+                            # Calcul final de la résistivité apparente (rho = K * V / I)
+                            if abs(current) > 1e-6:
+                                rho = k_factor * (voltage / current)
+                            else:
+                                rho = 0.0
+                        else:
+                            # MODE SIMULATION MATÉRIELLE
+                            rho = simulate_earth_physics(i, l, k, j, spacing)
+                            current = 0.045 + random.uniform(-0.002, 0.002) # ~45mA simulés avec shunt 50 Ohms
+                            voltage = (rho * current) / k_factor
+
+                        # Archivage temporaire des données lues
+                        batch_data.append((scan_id, stake_a, stake_b, stake_m, stake_n, voltage, current, rho))
+                        
+                        if len(batch_data) >= BATCH_SIZE:
+                            cursor.executemany("""
+                                INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, batch_data)
+                            db.commit()
+                            batch_data = []
+                            print(f"Points sauvegardés - Index [{i},{l},{k},{j}] | K: {k_factor:.2f} | Rho: {rho:.2f} Ohm.m (I: {current*1000:.2f} mA, V: {voltage:.4f} V)")
+
+        # Sauvegarde finale des données restantes
         if batch_data:
             cursor.executemany("""
                 INSERT INTO matrix_points (scan_id, stake_a, stake_b, stake_m, stake_n, measured_voltage, injected_current, calculated_apparent_resistivity)
@@ -181,10 +184,10 @@ def run_scanner(scan_id, spacing):
 
         cursor.execute("UPDATE scans SET status = 'completed' WHERE id = ?", (scan_id,))
         db.commit()
-        print("Scan completed successfully.")
+        print("Scan profiler exécuté avec succès.")
 
     except Exception as e:
-        print(f"Runtime Error: {e}")
+        print(f"Erreur d'exécution critique : {e}")
         cursor.execute("UPDATE scans SET status = 'aborted' WHERE id = ?", (scan_id,))
         db.commit()
     finally:
@@ -194,9 +197,9 @@ def run_scanner(scan_id, spacing):
         db.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ERT Hardware Profiler")
-    parser.add_argument("--scan_id", type=int, required=True, help="ID of the scan to execute")
-    parser.add_argument("--spacing", type=float, required=True, help="Electrode spacing in meters")
+    parser = argparse.ArgumentParser(description="ERT Multi-Profile Combinatorial Engine")
+    parser.add_argument("--scan_id", type=int, required=True, help="ID du scan à exécuter")
+    parser.add_argument("--spacing", type=float, required=True, help="Distance unitaire 'a' entre deux piquets en mètres")
     
     args = parser.parse_args()
     run_scanner(args.scan_id, args.spacing)

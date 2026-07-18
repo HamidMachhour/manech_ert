@@ -11,11 +11,12 @@ except Exception:
 
 class ErtMatrixController:
     """
-    Manages a 16-Electrode ERT Switch Matrix using an MCP23017 I/O expander
-    and synchronizes a 16-LED WS2812B strip using raw spidev native byte-arrays.
+    Gère une matrice d'électrodes ERT à 16 piquets avec disposition alternée :
+    A0-M0-N0-B0 - A1-M1-N1-B1 - A2-M2-N2-B2 - A3-M3-N3-B3
+    Utilise un MCP23017 pour piloter les relais et un ruban de 16 LED WS2812B via SPI.
     """
     
-    # MCP23017 Register Addresses
+    # Adresses des registres du MCP23017
     IODIRA = 0x00   
     IODIRB = 0x01   
     GPIOA  = 0x12   
@@ -30,62 +31,58 @@ class ErtMatrixController:
         self.adc = None
         self.adc_present = False
         
-        # 1. Initialize SMBus2 for MCP23017
+        # 1. Initialisation de l'I2C pour le MCP23017
         last_i2c_error = None
         validated_bus_id = i2c_bus_id
 
         for bus_id in [i2c_bus_id, 1, 0]:
             try:
                 self.bus = smbus2.SMBus(bus_id)
-                
-                # Configure tous les pins du Port A et B en SORTIES (0 = Output)
+                # Configuration de toutes les broches en sorties (0x00 = Output)
                 self.bus.write_byte_data(self.mcp_address, self.IODIRA, 0x00)
                 self.bus.write_byte_data(self.mcp_address, self.IODIRB, 0x00)
-                
                 self.hardware_present = True
                 validated_bus_id = bus_id
-                print(f" -> [OK] Physical MCP23017 detected and initialized on I2C bus {bus_id}.")
+                print(f" -> [OK] MCP23017 physique détecté et initialisé sur le bus I2C {bus_id}.")
                 break
             except Exception as exc:
                 last_i2c_error = exc
-                print(f" -> [WARN] I2C bus {bus_id} unavailable: {exc}")
+                print(f" -> [WARN] Bus I2C {bus_id} indisponible : {exc}")
 
         if not self.hardware_present:
-            print(f" -> [SIMULATION] No physical I2C device found. Running in offline test mode. Last error: {last_i2c_error}")
+            print(f" -> [SIMULATION] Aucun périphérique I2C physique détecté. Mode déconnecté. Dernier message : {last_i2c_error}")
         else:
             try:
                 if ADS1115_MODULE is not None:
-                    # Utilise le bus_id validé dynamiquement lors de la boucle précédente
                     self.adc = ADS1115_MODULE(address=0x48, busnum=validated_bus_id)
                     self.adc_present = True
-                    print(f" -> [OK] ADS1115 ADC detected and initialized on the shared I2C bus {validated_bus_id}.")
+                    print(f" -> [OK] ADS1115 détecté et initialisé sur le bus partagé I2C {validated_bus_id}.")
                 else:
-                    print(" -> [WARN] ADS1115 Python library is not available; ADC readings will be simulated.")
+                    print(" -> [WARN] Bibliothèque Adafruit_ADS1x15 manquante ; mesures simulées.")
             except Exception as exc:
                 self.adc_present = False
-                print(f" -> [WARN] ADS1115 initialization failed: {exc}")
+                print(f" -> [WARN] Échec d'initialisation de l'ADS1115 : {exc}")
         
-        # 2. Initialize Hardware SPI via spidev for WS2812B
+        # 2. Initialisation de l'interface SPI pour les LED WS2812B
         try:
             self.spi = spidev.SpiDev()
             self.spi.open(0, 0)
             self.spi.max_speed_hz = 6400000
             self.spi_present = True
-            print(" -> [OK] Hardware SPI bus successfully mapped.")
+            print(" -> [OK] Bus SPI matériel correctement mappé.")
         except Exception:
             self.spi_present = False
-            print(" -> [SIMULATION] SPI Bus not accessible. Simulating LED outputs.")
+            print(" -> [SIMULATION] Bus SPI inaccessible. Animation LED simulée.")
         
-        # 3. Create a plain Python list for tracking colors
+        # 3. Initialisation de la table d'état des couleurs des LED
         self.led_list = [[0, 0, 0] for _ in range(self.led_count)]
         
-        # 4. Initial system flush
+        # 4. Extinction générale de sécurité au démarrage
         self.clear_all()
 
     def _send_to_led_strip(self):
-        """Translates color list into raw SPI pulses if hardware is online."""
+        """Transmet l'état des couleurs au ruban de LED via le protocole SPI."""
         if not self.spi_present:
-            print(f"    [SIM LIGHTS] Active LED Color Map: {self.led_list}")
             return
             
         spi_data = []
@@ -100,30 +97,29 @@ class ErtMatrixController:
         try:
             self.spi.xfer2(spi_data)
         except OSError as e:
-            print(f" -> SPI write execution failure: {e}")
+            print(f" -> Échec de l'envoi SPI aux LED : {e}")
 
     def clear_strip(self):
-        """Dedicated function to turn off all pixels on the LED strip."""
+        """Éteint le ruban de LED."""
         self.led_list = [[0, 0, 0] for _ in range(self.led_count)]
         self._send_to_led_strip()
 
     def clear_all(self):
-        """Safely deactivates all relays and clears the LED strip."""
+        """Ouvre tous les relais (mise hors tension) et éteint les LED."""
         self.clear_strip()
-
         if self.hardware_present:
             try:
                 self.bus.write_byte_data(self.mcp_address, self.GPIOA, 0x00)
                 self.bus.write_byte_data(self.mcp_address, self.GPIOB, 0x00)
             except OSError as e:
-                print(f" -> Hardware connection lost during clear operation: {e}")
+                print(f" -> Perte de connexion matérielle lors de la coupure générale : {e}")
         else:
-            print("    [SIM HARDWARE] Matrix Open Isolation: All 16 relay pins forced LOW (0x00).")
+            print("    [SIM MATÉRIEL] Isolation complète : Les 16 broches de relais sont à l'état BAS (0x00).")
 
     def _write_to_relays(self, combined_16bit_word):
-        """Writes a 16-bit word to the MCP23017 GPIO registers directly."""
+        """Envoie un mot de 16 bits directement aux registres du MCP23017."""
         if not self.hardware_present:
-            print(f"    [SIM HARDWARE] Relay Register Word Sent: {combined_16bit_word:016b}")
+            print(f"    [SIM MATÉRIEL] Mot binaire appliqué aux relais : {combined_16bit_word:016b}")
             return
 
         byte_A = combined_16bit_word & 0xFF
@@ -133,74 +129,89 @@ class ErtMatrixController:
             self.bus.write_byte_data(self.mcp_address, self.GPIOA, byte_A)
             self.bus.write_byte_data(self.mcp_address, self.GPIOB, byte_B)
         except OSError as e:
-            print(f" -> Hardware communication lost during write sequence: {e}")
+            print(f" -> Erreur de communication I2C lors de l'écriture relais : {e}")
 
-    def _electrode_bitmask(self, elec: int) -> int:
+    def _get_absolute_pin(self, piquet_type, index) -> int:
         """
-        Map a 1-based electrode number (1..16) to the combined 16-bit register
-        word where GPIOA holds odd electrodes (1,3,5...) in bits 0..7 and
-        GPIOB holds even electrodes (2,4,6...) in bits 8..15.
+        Retourne le numéro de relais physique (1 à 16) associé à la ligne 
+        et à l'index selon l'agencement alterné de la carte.
         """
-        if elec < 1 or elec > 16:
+        if piquet_type == 'A':
+            return 4 * index + 1   # A0=1, A1=5, A2=9, A3=13
+        elif piquet_type == 'M':
+            return 4 * index + 2   # M0=2, M1=6, M2=10, M3=14
+        elif piquet_type == 'N':
+            return 4 * index + 3   # N0=3, N1=7, N2=11, N3=15
+        elif piquet_type == 'B':
+            return 4 * index + 4   # B0=4, B1=8, B2=12, B3=16
+        return 0
+
+    def _electrode_bitmask(self, pin_number: int) -> int:
+        """Mappe un numéro de broche 1-16 vers le bit correspondant du MCP23017."""
+        if pin_number < 1 or pin_number > 16:
             return 0
-
-        if elec % 2 == 1:
-            index = (elec - 1) // 2
+        if pin_number % 2 == 1:
+            index = (pin_number - 1) // 2
             return 1 << index
         else:
-            index = (elec // 2) - 1
+            index = (pin_number // 2) - 1
             return 1 << (8 + index)
 
-    def activate_injection_quad(self, elec_A, elec_B):
-        """Sets LEDs (A, B) to RED, closes injection relays."""
-        print(f"\n[Command] Activating Injection Quad on Electrodes A={elec_A}, B={elec_B}")
-        self.clear_all()  
-        time.sleep(0.01)  
-        
-        self.led_list[elec_A - 1] = [255, 0, 0]  # Red
-        self.led_list[elec_B - 1] = [255, 0, 0]  
-        self._send_to_led_strip()
-        
-        combined = self._electrode_bitmask(elec_A) | self._electrode_bitmask(elec_B)
-        self._write_to_relays(combined)
+    def activate_quad(self, idx_A, idx_M, idx_N, idx_B):
+        """
+        Active simultanément les 4 relais nécessaires à la mesure sans aucun risque de court-circuit
+        grâce à la séparation physique des bus. Met à jour les LED (Rouge pour injection, Vert pour mesure).
+        """
+        pin_A = self._get_absolute_pin('A', idx_A)
+        pin_M = self._get_absolute_pin('M', idx_M)
+        pin_N = self._get_absolute_pin('N', idx_N)
+        pin_B = self._get_absolute_pin('B', idx_B)
 
-    def activate_measurement_quad(self, elec_M, elec_N):
-        """Sets LEDs (M, N) to GREEN, closes potential reading relays."""
-        print(f"\n[Command] Activating Measurement Quad on Electrodes M={elec_M}, N={elec_N}")
-        self.clear_all()  
+        print(f"[Commande] Activation des relais : A{idx_A}(Relais {pin_A}), M{idx_M}(Relais {pin_M}), N{idx_N}(Relais {pin_N}), B{idx_B}(Relais {pin_B})")
+        
+        self.clear_all()
         time.sleep(0.01)
-        
-        self.led_list[elec_M - 1] = [0, 255, 0]  # Green
-        self.led_list[elec_N - 1] = [0, 255, 0]  
+
+        # Coloration du ruban de LED
+        self.led_list[pin_A - 1] = [255, 0, 0]  # Rouge pour injection
+        self.led_list[pin_B - 1] = [255, 0, 0]
+        self.led_list[pin_M - 1] = [0, 255, 0]  # Vert pour mesure potentiel
+        self.led_list[pin_N - 1] = [0, 255, 0]
         self._send_to_led_strip()
-        
-        combined = self._electrode_bitmask(elec_M) | self._electrode_bitmask(elec_N)
+
+        # Construction et écriture du masque binaire
+        combined = (self._electrode_bitmask(pin_A) | 
+                    self._electrode_bitmask(pin_M) | 
+                    self._electrode_bitmask(pin_N) | 
+                    self._electrode_bitmask(pin_B))
         self._write_to_relays(combined)
 
     def read_adc(self):
-        """Read the ADS1115 differential voltage channels and return current/voltage values."""
+        """
+        Lit les tensions différentielles de l'ADS1115 (A0-A1 pour le sol, A2-A3 pour le shunt).
+        Retourne : (tension_volts, courant_amperes)
+        """
         if not self.adc_present or self.adc is None:
             return None, None
 
         try:
-            # Gain=1 donne une plage de +/-4.096V. Le pas LSB est de 0.125 mV (0.000125V).
-            # Index de l'ancienne lib Adafruit pour les mesures différentielles :
-            # 0 = Différentiel entre A0 (positif) et A1 (négatif)
-            # 3 = Différentiel entre A2 (positif) et A3 (négatif)
+            # 1. Lecture de la tension différentielle V (M - N) sur le canal 0
+            # Gain=1 permet une mesure jusqu'à +/-4.096V (LSB = 0.000125V)
             voltage_raw = self.adc.read_adc_difference(0, gain=1)
-            current_raw = self.adc.read_adc_difference(3, gain=1)
-
-            # Conversion du signal brut en Volts physiques
             voltage_volts = voltage_raw * 0.000125
-            current_volts = current_raw * 0.000125
 
-            # Calcul de l'intensité passant par le shunt de 10 Ohms (U = R * I)
-            shunt_resistance_ohms = 10.0
-            current_ma = (current_volts / shunt_resistance_ohms) * 1000.0
+            # 2. Lecture différentielle aux bornes de la résistance shunt sur le canal 3
+            # Gain=16 est indispensable pour la résistance de 50 Ohms sous 5V (Plage maximale +/-0.256V, LSB = 0.0000078125V)
+            current_raw = self.adc.read_adc_difference(3, gain=16)
+            shunt_voltage_volts = current_raw * 0.0000078125
 
-            return voltage_volts, current_ma
+            # Calcul de l'intensité réelle (I = U / R) avec R_shunt = 50.0 Ohms
+            shunt_resistance_ohms = 50.0
+            current_amperes = shunt_voltage_volts / shunt_resistance_ohms
+
+            return voltage_volts, current_amperes
         except Exception as exc:
-            print(f" -> [WARN] ADS1115 read failed: {exc}")
+            print(f" -> [WARN] Échec de scrutation de l'ADS1115 : {exc}")
             return None, None
 
     def close(self):
@@ -209,21 +220,15 @@ class ErtMatrixController:
             self.bus.close()
         if self.spi_present:
             self.spi.close()
-        print("\n -> [INFO] ERT Controller hardware instances safely released.")
+        print("\n -> [INFO] Ressources matérielles du contrôleur ERT libérées.")
 
 if __name__ == "__main__":
-    print("Testing Ultra-Lightweight Inline SPI Driver with ADS1115 Interface...")
     matrix = ErtMatrixController(i2c_bus_id=0, mcp_address=0x20)
     try:
-        matrix.activate_injection_quad(1, 4)
+        matrix.activate_quad(0, 1, 2, 3) # Test d'un quadruplet de piquets
         time.sleep(1.0)
-        
-        # Test de lecture des capteurs
         v, i = matrix.read_adc()
         if v is not None:
-            print(f" -> Mesures lues : Tension = {v:.4f} V, Courant = {i:.2f} mA")
-            
-        matrix.activate_measurement_quad(2, 3)
-        time.sleep(1.0)
+            print(f" -> Données lues : Tension = {v:.5f} V, Courant = {i*1000:.3f} mA")
     finally:
         matrix.close()
