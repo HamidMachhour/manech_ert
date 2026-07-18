@@ -132,40 +132,46 @@ class ErtMatrixController:
             print(f" -> Erreur de communication I2C lors de l'écriture relais : {e}")
 
     def _get_absolute_pin(self, piquet_type, index) -> int:
-        """
-        Retourne le numéro de relais physique (1 à 16) associé à la ligne 
-        et à l'index selon l'agencement alterné de la carte.
-        """
-        if piquet_type == 'A':
-            return 4 * index + 1   # A0=1, A1=5, A2=9, A3=13
-        elif piquet_type == 'M':
-            return 4 * index + 2   # M0=2, M1=6, M2=10, M3=14
-        elif piquet_type == 'N':
-            return 4 * index + 3   # N0=3, N1=7, N2=11, N3=15
-        elif piquet_type == 'B':
-            return 4 * index + 4   # B0=4, B1=8, B2=12, B3=16
-        return 0
-
-    def _electrode_bitmask(self, pin_number: int) -> int:
             """
-            Mappe un numéro de relais physique (1 à 16) vers le bit exact du MCP23017.
-            Corrige l'inversion et l'entrelacement des broches paires (Port B) et impaires (Port A).
+            Mappe les étiquettes des piquets vers le numéro de relais physique (1 à 16)
+            selon la nouvelle distribution cyclique et disjointe :
             """
-            if pin_number < 1 or pin_number > 16:
+            if not (0 <= index <= 3):
                 return 0
 
-            # Mappage matériel direct (Ajusté selon votre comportement observé)
-            # Relais 1 à 8 (Impairs) vont sur le Port A (bits 0 à 7)
-            # Relais 9 à 16 (Pairs) vont sur le Port B (bits 8 à 15)
+            if piquet_type == 'A':
+                return 4 * index + 1   # A0=1, A1=5, A2=9, A3=13
             
-            if pin_number <= 8:
-                # Exemple : Relais 1 -> bit 0, Relais 2 -> bit 1 ... Relais 8 -> bit 7
-                bit_position = pin_number - 1
-                return 1 << bit_position
-            else:
-                # Exemple : Relais 9 -> bit 8, Relais 10 -> bit 9 ... Relais 16 -> bit 15
-                bit_position = (pin_number - 9) + 8
-                return 1 << bit_position
+            elif piquet_type == 'M':
+                return 4 * index + 2   # M0=2, M1=6, M2=10, M3=14
+            
+            elif piquet_type == 'N':
+                return 4 * index + 3   # N0=3, N1=7, N2=11, N3=15
+            
+            elif piquet_type == 'B':
+                return 4 * index + 4   # B0=4, B1=8, B2=12, B3=16
+                
+            return 0
+
+    def _electrode_bitmask(self, pin_number: int) -> int:
+        """
+        Génère le masque binaire 16 bits selon votre nouveau câblage linéaire direct :
+        - Port A (PA0 -> PA7) contrôle les broches physiques 1 -> 8
+        - Port B (PB0 -> PB7) contrôle les broches physiques 9 -> 16
+        """
+        if pin_number < 1 or pin_number > 16:
+            return 0
+
+        if pin_number <= 8:
+            # Broches 1 à 8 sur le Port A (bits 0 à 7)
+            # Broche 1 -> bit 0, Broche 8 -> bit 7
+            bit_position = pin_number - 1
+            return 1 << bit_position
+        else:
+            # Broches 9 à 16 sur le Port B (bits 8 à 15 du mot global 16 bits)
+            # Broche 9 -> bit 8 (soit PB0), Broche 16 -> bit 15 (soit PB7)
+            bit_position = (pin_number - 9) + 8
+            return 1 << bit_position
             
     def activate_quad(self, idx_A, idx_M, idx_N, idx_B):
         """
